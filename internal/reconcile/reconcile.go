@@ -169,6 +169,7 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 	}
 
 	interval := parseInt64(ing.Annotations[annInterval], 60, 20)
+	ignoreTLS := parseBool(ing.Annotations[annIgnoreTLS])
 	group := ing.Annotations[annGroup]
 	parent, err := r.ensureGroup(ctx, group)
 	if err != nil {
@@ -185,12 +186,14 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 			Parent:        parent,
 		},
 		HTTPDetails: monitor.HTTPDetails{
-			URL:                 url,
-			Method:              parseMethod(ing.Annotations[annMethod]),
-			AcceptedStatusCodes: parseStatusCodes(ing.Annotations[annAcceptedStatusCodes]),
-			MaxRedirects:        parseInt(ing.Annotations[annMaxRedirects], 10),
-			IgnoreTLS:           parseBool(ing.Annotations[annIgnoreTLS]),
-			Timeout:             parseInt64(ing.Annotations[annTimeout], 48, 1),
+			URL:                      url,
+			Method:                   parseMethod(ing.Annotations[annMethod]),
+			AcceptedStatusCodes:      parseStatusCodes(ing.Annotations[annAcceptedStatusCodes]),
+			MaxRedirects:             parseInt(ing.Annotations[annMaxRedirects], 10),
+			IgnoreTLS:                ignoreTLS,
+			Timeout:                  parseInt64(ing.Annotations[annTimeout], 48, 1),
+			ExpiryNotification:       !ignoreTLS,
+			DomainExpiryNotification: !ignoreTLS,
 		},
 	}
 
@@ -281,7 +284,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 				HTTPDetails: monitor.HTTPDetails{
 					URL: entry.URL, Method: parseMethod(entry.Method),
 					AcceptedStatusCodes: codes, MaxRedirects: redirects, IgnoreTLS: entry.IgnoreTLS,
-					Timeout: timeout,
+					Timeout: timeout, ExpiryNotification: !entry.IgnoreTLS, DomainExpiryNotification: !entry.IgnoreTLS,
 				},
 			}
 			if entry.URL == "" {
@@ -521,6 +524,8 @@ func httpNeedsUpdate(cur monitor.HTTP, existing monitor.Base, desired *monitor.H
 		existing.MaxRetries != desired.MaxRetries ||
 		cur.Timeout != desired.Timeout ||
 		cur.IgnoreTLS != desired.IgnoreTLS ||
+		cur.ExpiryNotification != desired.ExpiryNotification ||
+		cur.DomainExpiryNotification != desired.DomainExpiryNotification ||
 		cur.Method != desired.Method ||
 		cur.MaxRedirects != desired.MaxRedirects ||
 		!slices.Equal(cur.AcceptedStatusCodes, desired.AcceptedStatusCodes)

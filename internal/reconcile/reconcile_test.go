@@ -94,4 +94,11 @@ func TestHTTPNeedsUpdate(t *testing.T) {
 	if httpNeedsUpdate(cur, existing, desired) {
 		t.Fatal("expected no update when fields match")
 	}
+
+	desired.ExpiryNotification = false
+	desired.DomainExpiryNotification = false
+	cur.ExpiryNotification = true
+	if !httpNeedsUpdate(cur, existing, desired) {
+		t.Fatal("expected update when expiry notification differs")
+	}
 }
