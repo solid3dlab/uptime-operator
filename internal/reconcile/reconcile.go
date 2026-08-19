@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,19 +21,28 @@ import (
 )
 
 const (
-	annEnabled  = "uptime-kuma.io/monitor"
-	annType     = "uptime-kuma.io/monitor-type"
-	annInterval = "uptime-kuma.io/monitor-interval"
-	annGroup    = "uptime-kuma.io/monitor-group"
+	annEnabled             = "uptime-kuma.io/monitor"
+	annType                = "uptime-kuma.io/monitor-type"
+	annInterval            = "uptime-kuma.io/monitor-interval"
+	annGroup               = "uptime-kuma.io/monitor-group"
+	annIgnoreTLS           = "uptime-kuma.io/ignore-tls"
+	annPath                = "uptime-kuma.io/path"
+	annAcceptedStatusCodes = "uptime-kuma.io/accepted-status-codes"
+	annMethod              = "uptime-kuma.io/method"
+	annMaxRedirects        = "uptime-kuma.io/max-redirects"
+	annTimeout             = "uptime-kuma.io/timeout"
+	annRetryInterval       = "uptime-kuma.io/retry-interval"
+	annMaxRetries          = "uptime-kuma.io/max-retries"
+	annHost                = "uptime-kuma.io/host"
 )
 
 // Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
 type Reconciler struct {
-	cfg    config.Config
-	k8s    kubernetes.Interface
-	kuma   *kuma.Client
-	log    *slog.Logger
-	tagID  int64
+	cfg   config.Config
+	k8s   kubernetes.Interface
+	kuma  *kuma.Client
+	log   *slog.Logger
+	tagID int64
 }
 
 // New builds a reconciler bound to an authenticated Kuma client.
@@ -153,12 +163,12 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 		return nil
 	}
 
-	url := extractIngressURL(ing)
-	if url == "" {
-		return fmt.Errorf("no host on ingress")
+	url, err := extractIngressURL(ing, ing.Annotations[annPath], ing.Annotations[annHost])
+	if err != nil {
+		return err
 	}
 
-	interval := parseInterval(ing.Annotations[annInterval], 60)
+	interval := parseInt64(ing.Annotations[annInterval], 60, 20)
 	group := ing.Annotations[annGroup]
 	parent, err := r.ensureGroup(ctx, group)
 	if err != nil {
@@ -169,16 +179,18 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 		Base: monitor.Base{
 			Name:          key,
 			Interval:      interval,
-			RetryInterval: 60,
-			MaxRetries:    3,
+			RetryInterval: parseInt64(ing.Annotations[annRetryInterval], 60, 1),
+			MaxRetries:    parseInt64(ing.Annotations[annMaxRetries], 3, 0),
 			IsActive:      true,
 			Parent:        parent,
 		},
 		HTTPDetails: monitor.HTTPDetails{
 			URL:                 url,
-			Method:              "GET",
-			AcceptedStatusCodes: []string{"200-299"},
-			MaxRedirects:        10,
+			Method:              parseMethod(ing.Annotations[annMethod]),
+			AcceptedStatusCodes: parseStatusCodes(ing.Annotations[annAcceptedStatusCodes]),
+			MaxRedirects:        parseInt(ing.Annotations[annMaxRedirects], 10),
+			IgnoreTLS:           parseBool(ing.Annotations[annIgnoreTLS]),
+			Timeout:             parseInt64(ing.Annotations[annTimeout], 48, 1),
 		},
 	}
 
@@ -190,14 +202,20 @@ type staticFile struct {
 }
 
 type staticMonitor struct {
-	Name                 string   `yaml:"name"`
-	Type                 string   `yaml:"type"`
-	URL                  string   `yaml:"url"`
-	Hostname             string   `yaml:"hostname"`
-	Port                 int      `yaml:"port"`
-	Group                string   `yaml:"group"`
-	Interval             int64    `yaml:"interval"`
-	AcceptedStatusCodes  []string `yaml:"accepted_statuscodes"`
+	Name                string   `yaml:"name"`
+	Type                string   `yaml:"type"`
+	URL                 string   `yaml:"url"`
+	Hostname            string   `yaml:"hostname"`
+	Port                int      `yaml:"port"`
+	Group               string   `yaml:"group"`
+	Interval            int64    `yaml:"interval"`
+	AcceptedStatusCodes []string `yaml:"accepted_statuscodes"`
+	IgnoreTLS           bool     `yaml:"ignore_tls"`
+	Method              string   `yaml:"method"`
+	MaxRedirects        int      `yaml:"max_redirects"`
+	Timeout             int64    `yaml:"timeout"`
+	RetryInterval       int64    `yaml:"retry_interval"`
+	MaxRetries          int64    `yaml:"max_retries"`
 }
 
 func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]monitor.Base) (map[string]struct{}, error) {
@@ -240,12 +258,30 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			if len(codes) == 0 {
 				codes = []string{"200-299"}
 			}
+			redirects := entry.MaxRedirects
+			if redirects == 0 {
+				redirects = 10
+			}
+			retry := entry.RetryInterval
+			if retry == 0 {
+				retry = 60
+			}
+			retries := entry.MaxRetries
+			if retries == 0 {
+				retries = 3
+			}
+			timeout := entry.Timeout
+			if timeout == 0 {
+				timeout = 48
+			}
 			desired := &monitor.HTTP{
 				Base: monitor.Base{
-					Name: key, Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
+					Name: key, Interval: interval, RetryInterval: retry, MaxRetries: retries, IsActive: true, Parent: parent,
 				},
 				HTTPDetails: monitor.HTTPDetails{
-					URL: entry.URL, Method: "GET", AcceptedStatusCodes: codes, MaxRedirects: 10,
+					URL: entry.URL, Method: parseMethod(entry.Method),
+					AcceptedStatusCodes: codes, MaxRedirects: redirects, IgnoreTLS: entry.IgnoreTLS,
+					Timeout: timeout,
 				},
 			}
 			if entry.URL == "" {
@@ -307,11 +343,10 @@ func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monito
 
 	var cur monitor.HTTP
 	if err := existing.As(&cur); err != nil {
-		// Fall back to recreate-on-mismatch using base fields only.
 		if existing.Interval == desired.Interval {
 			return nil
 		}
-	} else if cur.URL == desired.URL && existing.Interval == desired.Interval {
+	} else if !httpNeedsUpdate(cur, existing, desired) {
 		return nil
 	}
 
@@ -388,32 +423,115 @@ func monitorKey(ns, kind, name string) string {
 	return fmt.Sprintf("%s/%s/%s", ns, kind, name)
 }
 
-func extractIngressURL(ing *networkingv1.Ingress) string {
+func extractIngressURL(ing *networkingv1.Ingress, path, preferredHost string) (string, error) {
+	preferredHost = strings.TrimSpace(preferredHost)
 	tlsHosts := map[string]struct{}{}
 	for _, t := range ing.Spec.TLS {
 		for _, h := range t.Hosts {
 			tlsHosts[h] = struct{}{}
 		}
 	}
+	urlFor := func(host string) string {
+		scheme := "http"
+		if _, ok := tlsHosts[host]; ok {
+			scheme = "https"
+		}
+		return joinURL(scheme+"://"+host, path)
+	}
+	if preferredHost != "" {
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host == preferredHost {
+				return urlFor(preferredHost), nil
+			}
+		}
+		return "", fmt.Errorf("host %q not on ingress", preferredHost)
+	}
 	for _, rule := range ing.Spec.Rules {
 		if rule.Host == "" {
 			continue
 		}
-		scheme := "http"
-		if _, ok := tlsHosts[rule.Host]; ok {
-			scheme = "https"
-		}
-		return scheme + "://" + rule.Host
+		return urlFor(rule.Host), nil
 	}
-	return ""
+	return "", fmt.Errorf("no host on ingress")
 }
 
-func parseInterval(raw string, fallback int64) int64 {
+func joinURL(base, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" {
+		return base
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return strings.TrimRight(base, "/") + path
+}
+
+func parseBool(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseMethod(raw string) string {
+	m := strings.ToUpper(strings.TrimSpace(raw))
+	switch m {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS":
+		return m
+	default:
+		return "GET"
+	}
+}
+
+func parseStatusCodes(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{"200-299"}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"200-299"}
+	}
+	return out
+}
+
+func parseInt(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return fallback
+	}
+	return v
+}
+
+func httpNeedsUpdate(cur monitor.HTTP, existing monitor.Base, desired *monitor.HTTP) bool {
+	return cur.URL != desired.URL ||
+		existing.Interval != desired.Interval ||
+		existing.RetryInterval != desired.RetryInterval ||
+		existing.MaxRetries != desired.MaxRetries ||
+		cur.Timeout != desired.Timeout ||
+		cur.IgnoreTLS != desired.IgnoreTLS ||
+		cur.Method != desired.Method ||
+		cur.MaxRedirects != desired.MaxRedirects ||
+		!slices.Equal(cur.AcceptedStatusCodes, desired.AcceptedStatusCodes)
+}
+
+func parseInt64(raw string, fallback, min int64) int64 {
 	if raw == "" {
 		return fallback
 	}
 	v, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || v < 20 {
+	if err != nil || v < min {
 		return fallback
 	}
 	return v
