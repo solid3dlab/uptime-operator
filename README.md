@@ -45,7 +45,7 @@ about.
 | `uptime-kuma.io/monitor-interval` | `60` | check interval (seconds) |
 | `uptime-kuma.io/monitor-group` | — | Kuma group name (created if missing) |
 | `uptime-kuma.io/monitor-type` | `http` | reserved; Ingress path is HTTP |
-| `uptime-kuma.io/ignore-tls` | `false` | `"true"` skips TLS verify (Let's Encrypt staging) |
+| `uptime-kuma.io/ignore-tls` | `false` | `"true"` skips TLS verify and cert/domain expiry alerts (Let's Encrypt staging) |
 | `uptime-kuma.io/path` | `/` | path appended to the Ingress host |
 | `uptime-kuma.io/method` | `GET` | HTTP method (`GET`, `HEAD`, …) |
 | `uptime-kuma.io/accepted-status-codes` | `200-299` | comma-separated ranges or codes |
