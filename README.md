@@ -57,6 +57,31 @@ about.
 | `STATIC_MONITORS_PATH` | no | default `/config/monitors.yaml` |
 | `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 
+## Authentication
+
+Kuma has **no REST API for creating or updating monitors**. The operator
+talks to the same Socket.IO login the web UI uses (`username` + `password`).
+That has two consequences:
+
+1. **2FA must be off** on the account the operator uses. The Socket.IO
+   `login` event needs a one-time TOTP when 2FA is enabled, and this
+   operator cannot supply one. Create a dedicated machine user without 2FA
+   and keep 2FA on your personal admin account.
+2. **A Kuma API key cannot replace the password.** API keys only protect
+   `/metrics` and similar HTTP endpoints. They cannot authenticate Socket.IO
+   or manage monitors.
+
+Upstream:
+
+- [Impossible to login to websocket with API token](https://github.com/louislam/uptime-kuma/issues/3107)
+- [API keys and creating a monitor](https://github.com/louislam/uptime-kuma/issues/3625)
+- [REST API write endpoints for monitors and tags](https://github.com/louislam/uptime-kuma/issues/7150)
+- [`POST /api/monitor` is not implemented](https://github.com/louislam/uptime-kuma/issues/5935)
+- [REST-to-Socket.IO bridge (not merged)](https://github.com/louislam/uptime-kuma/pull/7153)
+
+A failed login with an empty error (`login: login: `) usually means the
+user has 2FA enabled.
+
 ## Build
 
 ```bash
