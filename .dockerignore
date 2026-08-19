@@ -1,0 +1,10 @@
+.git
+.github
+.vscode
+.bin
+bin
+dist
+*.md
+.pre-commit-config.yaml
+.gitignore
+Makefile
