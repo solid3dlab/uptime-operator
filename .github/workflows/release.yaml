@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build changelog from conventional commits
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          mode: COMMIT
+          configuration: ".github/release-changelog-config.json"
+
+      - name: Prepare release notes
+        id: notes
+        env:
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          if [ -z "${CHANGELOG//[[:space:]]/}" ]; then
+            echo "has_notes=false" >> "$GITHUB_OUTPUT"
+            echo "No user-facing changes in this release." > RELEASE_NOTES.md
+          else
+            echo "has_notes=true" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$CHANGELOG" > RELEASE_NOTES.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Update Changelog
+        if: ${{ !contains(github.ref_name, '-') && steps.notes.outputs.has_notes == 'true' }}
+        uses: stefanzweifel/changelog-updater-action@v1
+        with:
+          latest-version: ${{ github.ref_name }}
+          release-notes: ${{ steps.changelog.outputs.changelog }}
+
+      - name: Commit updated CHANGELOG
+        if: ${{ !contains(github.ref_name, '-') && steps.notes.outputs.has_notes == 'true' }}
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          branch: main
+          commit_message: "docs: update CHANGELOG"
+          file_pattern: CHANGELOG.md

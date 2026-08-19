@@ -67,6 +67,20 @@ make image          # docker → ghcr.io/solid3dlab/uptime-operator:<git-sha>
 Image: multi-stage, `CGO_ENABLED=0`, final stage `scratch` + CA certs, runs as
 UID 65532.
 
+## Release
+
+Push a semver tag. CI writes the GitHub release notes from conventional
+commits, updates `CHANGELOG.md`, and publishes
+
+`ghcr.io/solid3dlab/uptime-operator:<version>` (tag `v0.1.0` → image `0.1.0`).
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Prerelease tags like `v0.1.0-rc.1` skip the changelog commit.
+
 ## Deploy
 
 Manifests live in the cluster repo under

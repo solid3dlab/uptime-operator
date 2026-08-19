@@ -1,0 +1,33 @@
+{
+  "template": "#{{CHANGELOG}}",
+  "empty_template": "",
+  "commit_template": "- #{{TITLE}}",
+  "categories": [
+    {
+      "title": "### Added",
+      "labels": ["feat", "feature"]
+    },
+    {
+      "title": "### Fixed",
+      "labels": ["fix", "bugfix"]
+    },
+    {
+      "title": "### Changed",
+      "labels": ["refactor", "perf", "revert"]
+    }
+  ],
+  "ignore_labels": ["build", "chore", "ci", "docs", "ops", "style", "test", "tests"],
+  "label_extractor": [
+    {
+      "pattern": "^(build|chore|ci|docs|feat|feature|fix|bugfix|ops|perf|refactor|revert|style|test|tests)(\\([^)]*\\))?(!)?:\\s+",
+      "on_property": "title",
+      "target": "$1"
+    }
+  ],
+  "transformers": [
+    {
+      "pattern": "^- (build|chore|ci|docs|feat|feature|fix|bugfix|ops|perf|refactor|revert|style|test|tests)(\\([^)]*\\))?(!)?:\\s+",
+      "target": "- "
+    }
+  ]
+}
