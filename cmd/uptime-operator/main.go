@@ -9,7 +9,7 @@ import (
 	"time"
 
 	kuma "github.com/breml/go-uptime-kuma-client"
-	"k8s.io/client-go/kubernetes"
+	networkingclient "k8s.io/client-go/kubernetes/typed/networking/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -32,7 +32,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	k8s, err := newK8sClient()
+	ings, err := newIngressLister()
 	if err != nil {
 		log.Error("kubernetes client", "err", err)
 		os.Exit(1)
@@ -42,7 +42,7 @@ func main() {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := runLoop(ctx, cfg, k8s, log); err != nil {
+		if err := runLoop(ctx, cfg, ings, log); err != nil {
 			log.Error("operator loop ended", "err", err)
 		}
 		select {
@@ -53,7 +53,7 @@ func main() {
 	log.Info("shutting down")
 }
 
-func runLoop(ctx context.Context, cfg config.Config, k8s kubernetes.Interface, log *slog.Logger) error {
+func runLoop(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, log *slog.Logger) error {
 	log.Info("connecting to uptime kuma", "url", cfg.KumaURL)
 	client, err := kuma.New(ctx, cfg.KumaURL, cfg.KumaUsername, cfg.KumaPassword)
 	if err != nil {
@@ -61,7 +61,7 @@ func runLoop(ctx context.Context, cfg config.Config, k8s kubernetes.Interface, l
 	}
 	defer client.Disconnect()
 
-	rec := reconcile.New(cfg, k8s, client, log)
+	rec := reconcile.New(cfg, ings, client, log)
 	if err := rec.EnsureManagedTag(ctx); err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func runLoop(ctx context.Context, cfg config.Config, k8s kubernetes.Interface, l
 	}
 }
 
-func newK8sClient() (kubernetes.Interface, error) {
+func newIngressLister() (reconcile.IngressLister, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -96,7 +96,11 @@ func newK8sClient() (kubernetes.Interface, error) {
 			return nil, err
 		}
 	}
-	return kubernetes.NewForConfig(cfg)
+	client, err := networkingclient.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return client.Ingresses(""), nil
 }
 
 func parseLogLevel(v string) slog.Level {

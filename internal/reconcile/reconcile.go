@@ -15,10 +15,14 @@ import (
 	"gopkg.in/yaml.v3"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/solid3dlab/uptime-operator/internal/config"
 )
+
+// IngressLister is the only Kubernetes API the operator needs.
+type IngressLister interface {
+	List(ctx context.Context, opts metav1.ListOptions) (*networkingv1.IngressList, error)
+}
 
 const (
 	annEnabled             = "uptime-kuma.io/monitor"
@@ -39,14 +43,14 @@ const (
 // Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
 type Reconciler struct {
 	cfg   config.Config
-	k8s   kubernetes.Interface
+	k8s   IngressLister
 	kuma  *kuma.Client
 	log   *slog.Logger
 	tagID int64
 }
 
 // New builds a reconciler bound to an authenticated Kuma client.
-func New(cfg config.Config, k8s kubernetes.Interface, client *kuma.Client, log *slog.Logger) *Reconciler {
+func New(cfg config.Config, k8s IngressLister, client *kuma.Client, log *slog.Logger) *Reconciler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -96,7 +100,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		seen[k] = struct{}{}
 	}
 
-	ings, err := r.k8s.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
+	ings, err := r.k8s.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list ingresses: %w", err)
 	}
