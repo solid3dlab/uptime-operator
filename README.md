@@ -23,9 +23,9 @@ runtime package installs. Typical footprint is tens of MiB RAM.
 ```
 
 1. Every `RESYNC_INTERVAL` seconds (default 300), the operator:
+   - connects to Uptime Kuma over Socket.IO, syncs, then disconnects
    - lists all cluster Ingresses
    - loads optional static monitors from `/config/monitors.yaml`
-   - connects to Uptime Kuma over Socket.IO and logs in
 2. For each Ingress with `uptime-kuma.io/monitor: "true"`, it ensures a
    monitor named `namespace/Ingress/name` exists with the right URL/interval.
 3. Monitors it owns are tagged `managed-by-uptime-operator`. Manual monitors

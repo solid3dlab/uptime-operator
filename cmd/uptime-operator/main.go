@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -42,48 +43,36 @@ func main() {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := runLoop(ctx, cfg, ings, log); err != nil {
-			log.Error("operator loop ended", "err", err)
+		wait := cfg.ResyncInterval
+		if err := runOnce(ctx, cfg, ings, log); err != nil {
+			log.Error("reconcile", "err", err)
+			wait = 30 * time.Second
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(30 * time.Second):
+		case <-time.After(wait):
 		}
 	}
 	log.Info("shutting down")
 }
 
-func runLoop(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, log *slog.Logger) error {
+func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, log *slog.Logger) error {
 	log.Info("connecting to uptime kuma", "url", cfg.KumaURL)
 	client, err := kuma.New(ctx, cfg.KumaURL, cfg.KumaUsername, cfg.KumaPassword)
 	if err != nil {
 		return err
 	}
-	defer client.Disconnect()
+	defer func() {
+		_ = client.Disconnect()
+		// Return idle heap to the OS so RSS drops between 5-minute syncs.
+		debug.FreeOSMemory()
+	}()
 
 	rec := reconcile.New(cfg, ings, client, log)
 	if err := rec.EnsureManagedTag(ctx); err != nil {
 		return err
 	}
-
-	ticker := time.NewTicker(cfg.ResyncInterval)
-	defer ticker.Stop()
-
-	// Immediate first pass.
-	if err := rec.ReconcileOnce(ctx); err != nil {
-		log.Error("reconcile", "err", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if err := rec.ReconcileOnce(ctx); err != nil {
-				log.Error("reconcile", "err", err)
-			}
-		}
-	}
+	return rec.ReconcileOnce(ctx)
 }
 
 func newIngressLister() (reconcile.IngressLister, error) {
