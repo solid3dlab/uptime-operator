@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"context"
 	"testing"
 
 	"github.com/breml/go-uptime-kuma-client/monitor"
@@ -100,5 +101,21 @@ func TestHTTPNeedsUpdate(t *testing.T) {
 	cur.ExpiryNotification = true
 	if !httpNeedsUpdate(cur, existing, desired) {
 		t.Fatal("expected update when expiry notification differs")
+	}
+}
+
+func TestEnsureGroupUsesCache(t *testing.T) {
+	t.Parallel()
+	r := &Reconciler{groups: map[string]int64{"prod": 7}}
+	id, err := r.ensureGroup(context.Background(), "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == nil || *id != 7 {
+		t.Fatalf("cached group: %v", id)
+	}
+	id, err = r.ensureGroup(context.Background(), "")
+	if err != nil || id != nil {
+		t.Fatalf("empty group should be a no-op: %v %v", id, err)
 	}
 }

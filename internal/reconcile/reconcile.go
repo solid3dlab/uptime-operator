@@ -42,11 +42,12 @@ const (
 
 // Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
 type Reconciler struct {
-	cfg   config.Config
-	k8s   IngressLister
-	kuma  *kuma.Client
-	log   *slog.Logger
-	tagID int64
+	cfg    config.Config
+	k8s    IngressLister
+	kuma   *kuma.Client
+	log    *slog.Logger
+	tagID  int64
+	groups map[string]int64
 }
 
 // New builds a reconciler bound to an authenticated Kuma client.
@@ -136,8 +137,12 @@ func (r *Reconciler) managedMonitors(ctx context.Context) (map[string]monitor.Ba
 	if err != nil {
 		return nil, fmt.Errorf("get monitors: %w", err)
 	}
+	r.groups = make(map[string]int64)
 	out := make(map[string]monitor.Base)
 	for _, m := range mons {
+		if m.Type() == "group" {
+			r.groups[m.Name] = m.ID
+		}
 		if hasTag(m.Tags, r.cfg.ManagedTag) {
 			out[m.Name] = m
 			continue
@@ -406,15 +411,8 @@ func (r *Reconciler) ensureGroup(ctx context.Context, name string) (*int64, erro
 	if name == "" {
 		return nil, nil
 	}
-	mons, err := r.kuma.GetMonitors(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, m := range mons {
-		if m.Type() == "group" && m.Name == name {
-			id := m.ID
-			return &id, nil
-		}
+	if id, ok := r.groups[name]; ok {
+		return &id, nil
 	}
 	id, err := r.kuma.CreateMonitor(ctx, &monitor.Group{
 		Base: monitor.Base{Name: name, IsActive: true, Interval: 60, RetryInterval: 60, MaxRetries: 3},
@@ -422,6 +420,10 @@ func (r *Reconciler) ensureGroup(ctx context.Context, name string) (*int64, erro
 	if err != nil {
 		return nil, fmt.Errorf("create group %q: %w", name, err)
 	}
+	if r.groups == nil {
+		r.groups = make(map[string]int64)
+	}
+	r.groups[name] = id
 	r.log.Info("created monitor group", "name", name, "id", id)
 	return &id, nil
 }
