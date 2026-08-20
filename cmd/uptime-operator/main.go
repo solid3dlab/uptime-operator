@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +25,10 @@ func main() {
 		Level: parseLogLevel(os.Getenv("LOG_LEVEL")),
 	}))
 	slog.SetDefault(log)
+
+	if limit, ok := applyCgroupMemLimit(); ok {
+		log.Info("memory limit", "gomemlimit_bytes", limit)
+	}
 
 	cfg, err := config.FromEnv()
 	if err != nil {
@@ -90,6 +96,36 @@ func newIngressLister() (reconcile.IngressLister, error) {
 		return nil, err
 	}
 	return client.Ingresses(""), nil
+}
+
+// applyCgroupMemLimit sets GOMEMLIMIT to 90% of the container memory
+// cap when the process did not set GOMEMLIMIT itself. This keeps the
+// Go heap from growing to the cgroup OOM threshold between GCs.
+func applyCgroupMemLimit() (int64, bool) {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return 0, false
+	}
+	for _, path := range []string{
+		"/sys/fs/cgroup/memory.max",
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		s := strings.TrimSpace(string(raw))
+		if s == "" || s == "max" {
+			continue
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n <= 0 || n > 1<<40 {
+			continue
+		}
+		limit := n * 90 / 100
+		debug.SetMemoryLimit(limit)
+		return limit, true
+	}
+	return 0, false
 }
 
 func parseLogLevel(v string) slog.Level {

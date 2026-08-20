@@ -65,6 +65,7 @@ about.
 | `RESYNC_INTERVAL` | no | seconds between full syncs (default `300`) |
 | `STATIC_MONITORS_PATH` | no | default `/config/monitors.yaml` |
 | `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `GOMEMLIMIT` | no | Go heap cap (e.g. `58MiB`). Unset: 90% of the container memory limit |
 
 ## Authentication
 
