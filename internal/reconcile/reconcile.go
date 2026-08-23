@@ -11,6 +11,7 @@ import (
 
 	kuma "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/monitor"
+	"github.com/breml/go-uptime-kuma-client/notification"
 	kumtag "github.com/breml/go-uptime-kuma-client/tag"
 	"gopkg.in/yaml.v3"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -36,8 +37,10 @@ const (
 	annMaxRedirects        = "uptime-kuma.io/max-redirects"
 	annTimeout             = "uptime-kuma.io/timeout"
 	annRetryInterval       = "uptime-kuma.io/retry-interval"
-	annMaxRetries          = "uptime-kuma.io/max-retries"
-	annHost                = "uptime-kuma.io/host"
+	annMaxRetries               = "uptime-kuma.io/max-retries"
+	annHost                     = "uptime-kuma.io/host"
+	annUseDefaultNotification   = "uptime-kuma.io/use-default-notification"
+	annNotification             = "uptime-kuma.io/notification"
 )
 
 // Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
@@ -46,8 +49,9 @@ type Reconciler struct {
 	k8s    IngressLister
 	kuma   *kuma.Client
 	log    *slog.Logger
-	tagID  int64
-	groups map[string]int64
+	tagID         int64
+	groups        map[string]int64
+	notifications []notification.Base
 }
 
 // New builds a reconciler bound to an authenticated Kuma client.
@@ -86,6 +90,7 @@ func (r *Reconciler) EnsureManagedTag(ctx context.Context) error {
 // ReconcileOnce performs one full sync cycle.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	r.log.Info("starting reconciliation")
+	r.notifications = r.kuma.GetNotifications(ctx)
 
 	managed, err := r.managedMonitors(ctx)
 	if err != nil {
@@ -184,15 +189,28 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 	if err != nil {
 		return err
 	}
+	useDefaultNotification := parseBool(ing.Annotations[annUseDefaultNotification])
+	notificationIDs, err := resolveNotificationIDs(
+		r.notifications,
+		useDefaultNotification,
+		parseCSV(ing.Annotations[annNotification]),
+	)
+	if err != nil {
+		return err
+	}
+	if useDefaultNotification && len(notificationIDs) == 0 && strings.TrimSpace(ing.Annotations[annNotification]) == "" {
+		r.log.Warn("use-default-notification set but no default Kuma channel exists", "key", key)
+	}
 
 	desired := &monitor.HTTP{
 		Base: monitor.Base{
-			Name:          key,
-			Interval:      interval,
-			RetryInterval: parseInt64(ing.Annotations[annRetryInterval], 60, 1),
-			MaxRetries:    parseInt64(ing.Annotations[annMaxRetries], 3, 0),
-			IsActive:      true,
-			Parent:        parent,
+			Name:            key,
+			Interval:        interval,
+			RetryInterval:   parseInt64(ing.Annotations[annRetryInterval], 60, 1),
+			MaxRetries:      parseInt64(ing.Annotations[annMaxRetries], 3, 0),
+			IsActive:        true,
+			Parent:          parent,
+			NotificationIDs: notificationIDs,
 		},
 		HTTPDetails: monitor.HTTPDetails{
 			URL:                      url,
@@ -226,8 +244,11 @@ type staticMonitor struct {
 	Method              string   `yaml:"method"`
 	MaxRedirects        int      `yaml:"max_redirects"`
 	Timeout             int64    `yaml:"timeout"`
-	RetryInterval       int64    `yaml:"retry_interval"`
-	MaxRetries          int64    `yaml:"max_retries"`
+	RetryInterval           int64    `yaml:"retry_interval"`
+	MaxRetries              int64    `yaml:"max_retries"`
+	UseDefaultNotification  bool     `yaml:"use_default_notification"`
+	Notification            string   `yaml:"notification"`
+	Notifications           []string `yaml:"notifications"`
 }
 
 func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]monitor.Base) (map[string]struct{}, error) {
@@ -260,6 +281,15 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			r.log.Error("static group", "name", entry.Name, "err", err)
 			continue
 		}
+		notificationIDs, err := resolveNotificationIDs(
+			r.notifications,
+			entry.UseDefaultNotification,
+			append(parseCSV(entry.Notification), entry.Notifications...),
+		)
+		if err != nil {
+			r.log.Error("static notification", "name", entry.Name, "err", err)
+			continue
+		}
 		typ := strings.ToLower(entry.Type)
 		if typ == "" {
 			typ = "http"
@@ -289,6 +319,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			desired := &monitor.HTTP{
 				Base: monitor.Base{
 					Name: key, Interval: interval, RetryInterval: retry, MaxRetries: retries, IsActive: true, Parent: parent,
+					NotificationIDs: notificationIDs,
 				},
 				HTTPDetails: monitor.HTTPDetails{
 					URL: entry.URL, Method: parseMethod(entry.Method),
@@ -307,6 +338,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			desired := &monitor.Ping{
 				Base: monitor.Base{
 					Name: key, Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
+					NotificationIDs: notificationIDs,
 				},
 				PingDetails: monitor.PingDetails{Hostname: entry.Hostname},
 			}
@@ -321,6 +353,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			desired := &monitor.TCPPort{
 				Base: monitor.Base{
 					Name: key, Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
+					NotificationIDs: notificationIDs,
 				},
 				TCPPortDetails: monitor.TCPPortDetails{
 					Hostname: entry.Hostname,
@@ -380,7 +413,8 @@ func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monito
 	}
 	var cur monitor.Ping
 	_ = existing.As(&cur)
-	if cur.Hostname == desired.Hostname && existing.Interval == desired.Interval {
+	if cur.Hostname == desired.Hostname && existing.Interval == desired.Interval &&
+		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) {
 		return nil
 	}
 	desired.ID = existing.ID
@@ -400,7 +434,8 @@ func (r *Reconciler) ensurePort(ctx context.Context, key string, desired *monito
 	}
 	var cur monitor.TCPPort
 	_ = existing.As(&cur)
-	if cur.Hostname == desired.Hostname && cur.Port == desired.Port && existing.Interval == desired.Interval {
+	if cur.Hostname == desired.Hostname && cur.Port == desired.Port && existing.Interval == desired.Interval &&
+		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) {
 		return nil
 	}
 	desired.ID = existing.ID
@@ -534,7 +569,8 @@ func httpNeedsUpdate(cur monitor.HTTP, existing monitor.Base, desired *monitor.H
 		cur.DomainExpiryNotification != desired.DomainExpiryNotification ||
 		cur.Method != desired.Method ||
 		cur.MaxRedirects != desired.MaxRedirects ||
-		!slices.Equal(cur.AcceptedStatusCodes, desired.AcceptedStatusCodes)
+		!slices.Equal(cur.AcceptedStatusCodes, desired.AcceptedStatusCodes) ||
+		!notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs)
 }
 
 func parseInt64(raw string, fallback, min int64) int64 {
@@ -546,6 +582,80 @@ func parseInt64(raw string, fallback, min int64) int64 {
 		return fallback
 	}
 	return v
+}
+
+func parseCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func resolveNotificationIDs(notifs []notification.Base, useDefault bool, names []string) ([]int64, error) {
+	byName := make(map[string]notification.Base, len(notifs))
+	var defaults []int64
+	for _, n := range notifs {
+		if !n.IsActive {
+			continue
+		}
+		byName[strings.ToLower(n.Name)] = n
+		if n.IsDefault {
+			defaults = append(defaults, n.ID)
+		}
+	}
+
+	ids := make([]int64, 0, len(defaults)+len(names))
+	seen := make(map[int64]struct{}, len(defaults)+len(names))
+	add := func(id int64) {
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if useDefault {
+		for _, id := range defaults {
+			add(id)
+		}
+	}
+
+	var missing []string
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		n, ok := byName[strings.ToLower(name)]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		add(n.ID)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("notification channel(s) not found: %s", strings.Join(missing, ", "))
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func notificationIDsEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as := slices.Clone(a)
+	bs := slices.Clone(b)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
 }
 
 func hasTag(tags []kumtag.MonitorTag, name string) bool {

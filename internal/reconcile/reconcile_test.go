@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/breml/go-uptime-kuma-client/monitor"
+	"github.com/breml/go-uptime-kuma-client/notification"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -44,6 +45,13 @@ func TestParseHelpers(t *testing.T) {
 	}
 	if parseInt64("15", 48, 1) != 15 || parseInt64("0", 48, 1) != 48 {
 		t.Fatal("parseInt64")
+	}
+	names := parseCSV(" Slack, PagerDuty , ")
+	if len(names) != 2 || names[0] != "Slack" || names[1] != "PagerDuty" {
+		t.Fatalf("parseCSV: %#v", names)
+	}
+	if parseCSV("") != nil || parseCSV("  ") != nil {
+		t.Fatal("parseCSV empty")
 	}
 }
 
@@ -101,6 +109,50 @@ func TestHTTPNeedsUpdate(t *testing.T) {
 	cur.ExpiryNotification = true
 	if !httpNeedsUpdate(cur, existing, desired) {
 		t.Fatal("expected update when expiry notification differs")
+	}
+
+	cur.ExpiryNotification = false
+	desired.NotificationIDs = []int64{2, 1}
+	existing.NotificationIDs = []int64{1}
+	if !httpNeedsUpdate(cur, existing, desired) {
+		t.Fatal("expected update when notification IDs differ")
+	}
+	existing.NotificationIDs = []int64{1, 2}
+	if httpNeedsUpdate(cur, existing, desired) {
+		t.Fatal("expected no update when notification IDs match in any order")
+	}
+}
+
+func TestResolveNotificationIDs(t *testing.T) {
+	t.Parallel()
+	notifs := []notification.Base{
+		{ID: 1, Name: "Slack", IsActive: true, IsDefault: true},
+		{ID: 2, Name: "PagerDuty", IsActive: true},
+		{ID: 3, Name: "Quiet", IsActive: false, IsDefault: true},
+	}
+
+	ids, err := resolveNotificationIDs(notifs, true, nil)
+	if err != nil || len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("default only: %#v %v", ids, err)
+	}
+
+	ids, err = resolveNotificationIDs(notifs, false, []string{"pagerduty"})
+	if err != nil || len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("named only: %#v %v", ids, err)
+	}
+
+	ids, err = resolveNotificationIDs(notifs, true, []string{"PagerDuty", "Slack"})
+	if err != nil || len(ids) != 2 || ids[0] != 1 || ids[1] != 2 {
+		t.Fatalf("union: %#v %v", ids, err)
+	}
+
+	if _, err = resolveNotificationIDs(notifs, false, []string{"Missing"}); err == nil {
+		t.Fatal("expected missing channel error")
+	}
+
+	ids, err = resolveNotificationIDs(notifs, false, nil)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("none: %#v %v", ids, err)
 	}
 }
 
