@@ -9,13 +9,13 @@ import (
 
 // Config is loaded from environment variables.
 type Config struct {
-	KumaURL           string
-	KumaUsername      string
-	KumaPassword      string
-	ResyncInterval    time.Duration
+	KumaURL            string
+	KumaUsername       string
+	KumaPassword       string
+	ResyncInterval     time.Duration
 	StaticMonitorsPath string
-	ManagedTag        string
-	ManagedTagColor   string
+	ManagedTag         string
+	ManagedTagColor    string
 }
 
 // FromEnv reads operator configuration from the process environment.

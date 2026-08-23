@@ -26,29 +26,29 @@ type IngressLister interface {
 }
 
 const (
-	annEnabled             = "uptime-kuma.io/monitor"
-	annType                = "uptime-kuma.io/monitor-type"
-	annInterval            = "uptime-kuma.io/monitor-interval"
-	annGroup               = "uptime-kuma.io/monitor-group"
-	annIgnoreTLS           = "uptime-kuma.io/ignore-tls"
-	annPath                = "uptime-kuma.io/path"
-	annAcceptedStatusCodes = "uptime-kuma.io/accepted-status-codes"
-	annMethod              = "uptime-kuma.io/method"
-	annMaxRedirects        = "uptime-kuma.io/max-redirects"
-	annTimeout             = "uptime-kuma.io/timeout"
-	annRetryInterval       = "uptime-kuma.io/retry-interval"
-	annMaxRetries               = "uptime-kuma.io/max-retries"
-	annHost                     = "uptime-kuma.io/host"
-	annUseDefaultNotification   = "uptime-kuma.io/use-default-notification"
-	annNotification             = "uptime-kuma.io/notification"
+	annEnabled                = "uptime-kuma.io/monitor"
+	annType                   = "uptime-kuma.io/monitor-type"
+	annInterval               = "uptime-kuma.io/monitor-interval"
+	annGroup                  = "uptime-kuma.io/monitor-group"
+	annIgnoreTLS              = "uptime-kuma.io/ignore-tls"
+	annPath                   = "uptime-kuma.io/path"
+	annAcceptedStatusCodes    = "uptime-kuma.io/accepted-status-codes"
+	annMethod                 = "uptime-kuma.io/method"
+	annMaxRedirects           = "uptime-kuma.io/max-redirects"
+	annTimeout                = "uptime-kuma.io/timeout"
+	annRetryInterval          = "uptime-kuma.io/retry-interval"
+	annMaxRetries             = "uptime-kuma.io/max-retries"
+	annHost                   = "uptime-kuma.io/host"
+	annUseDefaultNotification = "uptime-kuma.io/use-default-notification"
+	annNotification           = "uptime-kuma.io/notification"
 )
 
 // Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
 type Reconciler struct {
-	cfg    config.Config
-	k8s    IngressLister
-	kuma   *kuma.Client
-	log    *slog.Logger
+	cfg           config.Config
+	k8s           IngressLister
+	kuma          *kuma.Client
+	log           *slog.Logger
 	tagID         int64
 	groups        map[string]int64
 	notifications []notification.Base
@@ -232,23 +232,23 @@ type staticFile struct {
 }
 
 type staticMonitor struct {
-	Name                string   `yaml:"name"`
-	Type                string   `yaml:"type"`
-	URL                 string   `yaml:"url"`
-	Hostname            string   `yaml:"hostname"`
-	Port                int      `yaml:"port"`
-	Group               string   `yaml:"group"`
-	Interval            int64    `yaml:"interval"`
-	AcceptedStatusCodes []string `yaml:"accepted_statuscodes"`
-	IgnoreTLS           bool     `yaml:"ignore_tls"`
-	Method              string   `yaml:"method"`
-	MaxRedirects        int      `yaml:"max_redirects"`
-	Timeout             int64    `yaml:"timeout"`
-	RetryInterval           int64    `yaml:"retry_interval"`
-	MaxRetries              int64    `yaml:"max_retries"`
-	UseDefaultNotification  bool     `yaml:"use_default_notification"`
-	Notification            string   `yaml:"notification"`
-	Notifications           []string `yaml:"notifications"`
+	Name                   string   `yaml:"name"`
+	Type                   string   `yaml:"type"`
+	URL                    string   `yaml:"url"`
+	Hostname               string   `yaml:"hostname"`
+	Port                   int      `yaml:"port"`
+	Group                  string   `yaml:"group"`
+	Interval               int64    `yaml:"interval"`
+	AcceptedStatusCodes    []string `yaml:"accepted_statuscodes"`
+	IgnoreTLS              bool     `yaml:"ignore_tls"`
+	Method                 string   `yaml:"method"`
+	MaxRedirects           int      `yaml:"max_redirects"`
+	Timeout                int64    `yaml:"timeout"`
+	RetryInterval          int64    `yaml:"retry_interval"`
+	MaxRetries             int64    `yaml:"max_retries"`
+	UseDefaultNotification bool     `yaml:"use_default_notification"`
+	Notification           string   `yaml:"notification"`
+	Notifications          []string `yaml:"notifications"`
 }
 
 func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]monitor.Base) (map[string]struct{}, error) {
@@ -599,21 +599,12 @@ func parseCSV(raw string) []string {
 	return out
 }
 
+// resolveNotificationIDs builds the monitor notificationIDList.
+// useDefault enables whatever channels Kuma has marked Default (no name needed).
+// names are extra channels looked up by display name.
 func resolveNotificationIDs(notifs []notification.Base, useDefault bool, names []string) ([]int64, error) {
-	byName := make(map[string]notification.Base, len(notifs))
-	var defaults []int64
-	for _, n := range notifs {
-		if !n.IsActive {
-			continue
-		}
-		byName[strings.ToLower(n.Name)] = n
-		if n.IsDefault {
-			defaults = append(defaults, n.ID)
-		}
-	}
-
-	ids := make([]int64, 0, len(defaults)+len(names))
-	seen := make(map[int64]struct{}, len(defaults)+len(names))
+	ids := make([]int64, 0, len(notifs))
+	seen := make(map[int64]struct{}, len(notifs))
 	add := func(id int64) {
 		if _, ok := seen[id]; ok {
 			return
@@ -622,7 +613,7 @@ func resolveNotificationIDs(notifs []notification.Base, useDefault bool, names [
 		ids = append(ids, id)
 	}
 	if useDefault {
-		for _, id := range defaults {
+		for _, id := range defaultNotificationIDs(notifs) {
 			add(id)
 		}
 	}
@@ -633,18 +624,41 @@ func resolveNotificationIDs(notifs []notification.Base, useDefault bool, names [
 		if name == "" {
 			continue
 		}
-		n, ok := byName[strings.ToLower(name)]
+		id, ok := notificationIDByName(notifs, name)
 		if !ok {
 			missing = append(missing, name)
 			continue
 		}
-		add(n.ID)
+		add(id)
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("notification channel(s) not found: %s", strings.Join(missing, ", "))
 	}
 	slices.Sort(ids)
 	return ids, nil
+}
+
+func defaultNotificationIDs(notifs []notification.Base) []int64 {
+	var ids []int64
+	for _, n := range notifs {
+		if n.IsActive && n.IsDefault {
+			ids = append(ids, n.ID)
+		}
+	}
+	return ids
+}
+
+func notificationIDByName(notifs []notification.Base, name string) (int64, bool) {
+	want := strings.ToLower(name)
+	for _, n := range notifs {
+		if !n.IsActive {
+			continue
+		}
+		if strings.ToLower(n.Name) == want {
+			return n.ID, true
+		}
+	}
+	return 0, false
 }
 
 func notificationIDsEqual(a, b []int64) bool {
