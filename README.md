@@ -27,7 +27,10 @@ runtime package installs. Typical footprint is tens of MiB RAM.
    - lists all cluster Ingresses
    - loads optional static monitors from `/config/monitors.yaml`
 2. For each Ingress with `uptime-kuma.io/monitor: "true"`, it ensures a
-   monitor named `namespace/Ingress/name` exists with the right URL/interval.
+   monitor named `namespace/Ingress/name` exists with the right URL/interval
+   and notification channels. Kuma does not apply default channels to
+   Socket.IO-created monitors, so set `uptime-kuma.io/use-default-notification: "true"`
+   and/or `uptime-kuma.io/notification: "Channel Name"`.
 3. Monitors it owns are tagged `managed-by-uptime-operator`. Manual monitors
    without that tag are never touched.
 4. If an Ingress loses the annotation or is deleted, the matching managed
@@ -54,6 +57,24 @@ about.
 | `uptime-kuma.io/retry-interval` | `60` | seconds between retries after a failure |
 | `uptime-kuma.io/max-retries` | `3` | retries before the monitor is DOWN |
 | `uptime-kuma.io/host` | first rule | Ingress hostname to probe |
+| `uptime-kuma.io/use-default-notification` | `false` | `"true"` attaches every Kuma channel marked **Default** |
+| `uptime-kuma.io/notification` | — | comma-separated Kuma notification channel names |
+
+The two notification annotations can be combined. Named channels are matched
+case-insensitively against existing Kuma notification names; missing names
+fail that Ingress's reconcile.
+
+Static monitors use the same knobs:
+
+```yaml
+monitors:
+  - name: Flux webhook
+    url: https://example.com/
+    use_default_notification: true
+    notification: Slack
+    notifications:
+      - PagerDuty
+```
 
 ## Environment
 
