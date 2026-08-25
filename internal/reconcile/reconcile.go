@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	kuma "github.com/breml/go-uptime-kuma-client"
 	"github.com/breml/go-uptime-kuma-client/monitor"
@@ -49,6 +50,7 @@ type Reconciler struct {
 	k8s           IngressLister
 	kuma          *kuma.Client
 	log           *slog.Logger
+	now           func() time.Time
 	tagID         int64
 	groups        map[string]int64
 	notifications []notification.Base
@@ -59,7 +61,13 @@ func New(cfg config.Config, k8s IngressLister, client *kuma.Client, log *slog.Lo
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Reconciler{cfg: cfg, k8s: k8s, kuma: client, log: log}
+	return &Reconciler{
+		cfg:  cfg,
+		k8s:  k8s,
+		kuma: client,
+		log:  log,
+		now:  func() time.Time { return time.Now().UTC() },
+	}
 }
 
 // EnsureManagedTag finds or creates the ownership tag used for GC.
@@ -110,9 +118,14 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list ingresses: %w", err)
 	}
+	orphanAnns := map[string]map[string]string{}
 	for i := range ings.Items {
 		ing := &ings.Items[i]
 		key := monitorKey(ing.Namespace, "Ingress", ing.Name)
+		if !strings.EqualFold(ing.Annotations[annEnabled], "true") {
+			orphanAnns[key] = ing.Annotations
+			continue
+		}
 		seen[key] = struct{}{}
 		if err := r.reconcileIngress(ctx, ing, managed); err != nil {
 			r.log.Error("reconcile ingress", "key", key, "err", err)
@@ -123,9 +136,8 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		r.log.Info("deleting orphan monitor", "key", key, "id", mon.ID)
-		if err := r.kuma.DeleteMonitor(ctx, mon.ID); err != nil {
-			r.log.Error("delete orphan", "key", key, "err", err)
+		if err := r.gcOrphan(ctx, key, mon, orphanAnns[key]); err != nil {
+			r.log.Error("gc orphan", "key", key, "err", err)
 		}
 	}
 
@@ -167,15 +179,6 @@ func (r *Reconciler) managedMonitors(ctx context.Context) (map[string]monitor.Ba
 
 func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ingress, managed map[string]monitor.Base) error {
 	key := monitorKey(ing.Namespace, "Ingress", ing.Name)
-	enabled := strings.EqualFold(ing.Annotations[annEnabled], "true")
-
-	if !enabled {
-		if existing, ok := managed[key]; ok {
-			r.log.Info("removing monitor (annotation off)", "key", key)
-			return r.kuma.DeleteMonitor(ctx, existing.ID)
-		}
-		return nil
-	}
 
 	url, err := extractIngressURL(ing, ing.Annotations[annPath], ing.Annotations[annHost])
 	if err != nil {
@@ -205,6 +208,7 @@ func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ing
 	desired := &monitor.HTTP{
 		Base: monitor.Base{
 			Name:            key,
+			Description:     ptrString(formatGCDescription(r.policyFromAnnotations(ing.Annotations))),
 			Interval:        interval,
 			RetryInterval:   parseInt64(ing.Annotations[annRetryInterval], 60, 1),
 			MaxRetries:      parseInt64(ing.Annotations[annMaxRetries], 3, 0),
@@ -249,6 +253,8 @@ type staticMonitor struct {
 	UseDefaultNotification bool     `yaml:"use_default_notification"`
 	Notification           string   `yaml:"notification"`
 	Notifications          []string `yaml:"notifications"`
+	DeletePolicy           string   `yaml:"delete_policy"`
+	DeleteGrace            string   `yaml:"delete_grace"`
 }
 
 func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]monitor.Base) (map[string]struct{}, error) {
@@ -318,7 +324,8 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 			}
 			desired := &monitor.HTTP{
 				Base: monitor.Base{
-					Name: key, Interval: interval, RetryInterval: retry, MaxRetries: retries, IsActive: true, Parent: parent,
+					Name: key, Description: ptrString(formatGCDescription(r.policyFromStatic(entry))),
+					Interval: interval, RetryInterval: retry, MaxRetries: retries, IsActive: true, Parent: parent,
 					NotificationIDs: notificationIDs,
 				},
 				HTTPDetails: monitor.HTTPDetails{
@@ -337,7 +344,8 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 		case "ping":
 			desired := &monitor.Ping{
 				Base: monitor.Base{
-					Name: key, Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
+					Name: key, Description: ptrString(formatGCDescription(r.policyFromStatic(entry))),
+					Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
 					NotificationIDs: notificationIDs,
 				},
 				PingDetails: monitor.PingDetails{Hostname: entry.Hostname},
@@ -352,7 +360,8 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 		case "port":
 			desired := &monitor.TCPPort{
 				Base: monitor.Base{
-					Name: key, Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
+					Name: key, Description: ptrString(formatGCDescription(r.policyFromStatic(entry))),
+					Interval: interval, RetryInterval: 60, MaxRetries: 3, IsActive: true, Parent: parent,
 					NotificationIDs: notificationIDs,
 				},
 				TCPPortDetails: monitor.TCPPortDetails{
@@ -414,7 +423,8 @@ func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monito
 	var cur monitor.Ping
 	_ = existing.As(&cur)
 	if cur.Hostname == desired.Hostname && existing.Interval == desired.Interval &&
-		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) {
+		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) &&
+		descriptionEqual(existing.Description, desired.Description) {
 		return nil
 	}
 	desired.ID = existing.ID
@@ -435,7 +445,8 @@ func (r *Reconciler) ensurePort(ctx context.Context, key string, desired *monito
 	var cur monitor.TCPPort
 	_ = existing.As(&cur)
 	if cur.Hostname == desired.Hostname && cur.Port == desired.Port && existing.Interval == desired.Interval &&
-		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) {
+		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) &&
+		descriptionEqual(existing.Description, desired.Description) {
 		return nil
 	}
 	desired.ID = existing.ID
@@ -570,7 +581,8 @@ func httpNeedsUpdate(cur monitor.HTTP, existing monitor.Base, desired *monitor.H
 		cur.Method != desired.Method ||
 		cur.MaxRedirects != desired.MaxRedirects ||
 		!slices.Equal(cur.AcceptedStatusCodes, desired.AcceptedStatusCodes) ||
-		!notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs)
+		!notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) ||
+		!descriptionEqual(existing.Description, desired.Description)
 }
 
 func parseInt64(raw string, fallback, min int64) int64 {

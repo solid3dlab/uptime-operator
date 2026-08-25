@@ -121,6 +121,15 @@ func TestHTTPNeedsUpdate(t *testing.T) {
 	if httpNeedsUpdate(cur, existing, desired) {
 		t.Fatal("expected no update when notification IDs match in any order")
 	}
+
+	desired.Description = ptrString("delete-policy=deferred;delete-grace=24h")
+	if !httpNeedsUpdate(cur, existing, desired) {
+		t.Fatal("expected update when delete-policy description is missing")
+	}
+	existing.Description = desired.Description
+	if httpNeedsUpdate(cur, existing, desired) {
+		t.Fatal("expected no update when descriptions match")
+	}
 }
 
 func TestResolveNotificationIDs(t *testing.T) {
