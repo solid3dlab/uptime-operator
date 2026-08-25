@@ -14,7 +14,20 @@ const (
 	// DeleteDeferred keeps probing until DefaultDeleteGrace (or the Ingress
 	// annotation) elapses, so an accidental Helm uninstall still pages.
 	DeleteDeferred = "deferred"
+	// DeleteRetain never removes the monitor. The operator keeps probing the
+	// last URL until a human deletes it in Kuma or the policy is changed.
+	DeleteRetain = "retain"
 )
+
+// ValidDeletePolicy reports whether v is an accepted delete-policy value.
+func ValidDeletePolicy(v string) bool {
+	switch v {
+	case DeleteImmediate, DeleteDeferred, DeleteRetain:
+		return true
+	default:
+		return false
+	}
+}
 
 // Config is loaded from environment variables.
 type Config struct {
@@ -56,8 +69,8 @@ func FromEnv() (Config, error) {
 	}
 
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("DEFAULT_DELETE_POLICY"))); v != "" {
-		if v != DeleteImmediate && v != DeleteDeferred {
-			return Config{}, fmt.Errorf("invalid DEFAULT_DELETE_POLICY %q (immediate or deferred)", v)
+		if !ValidDeletePolicy(v) {
+			return Config{}, fmt.Errorf("invalid DEFAULT_DELETE_POLICY %q (immediate, deferred, or retain)", v)
 		}
 		cfg.DefaultDeletePolicy = v
 	}

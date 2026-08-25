@@ -28,19 +28,24 @@ const (
 	gcDelete gcAction = iota
 	gcHold
 	gcStamp
+	gcRetain
 )
 
 func decideGC(state gcState, now time.Time) gcAction {
-	if state.Policy != config.DeleteDeferred {
+	switch state.Policy {
+	case config.DeleteRetain:
+		return gcRetain
+	case config.DeleteDeferred:
+		if state.MissingSince == nil {
+			return gcStamp
+		}
+		if !now.Before(state.MissingSince.Add(state.Grace)) {
+			return gcDelete
+		}
+		return gcHold
+	default:
 		return gcDelete
 	}
-	if state.MissingSince == nil {
-		return gcStamp
-	}
-	if !now.Before(state.MissingSince.Add(state.Grace)) {
-		return gcDelete
-	}
-	return gcHold
 }
 
 func (r *Reconciler) defaultGCState() gcState {
@@ -60,10 +65,8 @@ func (r *Reconciler) policyFromAnnotations(anns map[string]string) gcState {
 	if anns == nil {
 		return state
 	}
-	if v := strings.ToLower(strings.TrimSpace(anns[annDeletePolicy])); v != "" {
-		if v == config.DeleteImmediate || v == config.DeleteDeferred {
-			state.Policy = v
-		}
+	if v := strings.ToLower(strings.TrimSpace(anns[annDeletePolicy])); config.ValidDeletePolicy(v) {
+		state.Policy = v
 	}
 	if v := strings.TrimSpace(anns[annDeleteGrace]); v != "" {
 		if d, err := config.ParseGrace(v); err == nil {
@@ -102,6 +105,9 @@ func (r *Reconciler) gcOrphan(ctx context.Context, key string, mon monitor.Base,
 	state := r.policyForOrphan(mon, anns)
 	now := r.now()
 	switch decideGC(state, now) {
+	case gcRetain:
+		r.log.Info("retaining orphan monitor", "key", key, "id", mon.ID)
+		return nil
 	case gcStamp:
 		r.log.Info("deferring orphan monitor",
 			"key", key, "id", mon.ID, "grace", formatGrace(state.Grace))
@@ -176,7 +182,7 @@ func parseGCDescription(desc *string) gcState {
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "delete-policy":
 			v := strings.ToLower(strings.TrimSpace(value))
-			if v == config.DeleteImmediate || v == config.DeleteDeferred {
+			if config.ValidDeletePolicy(v) {
 				state.Policy = v
 			}
 		case "delete-grace":

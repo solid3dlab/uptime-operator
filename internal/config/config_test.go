@@ -60,6 +60,12 @@ func TestFromEnvDeleteDefaults(t *testing.T) {
 		t.Fatalf("overrides: %+v", cfg)
 	}
 
+	t.Setenv("DEFAULT_DELETE_POLICY", "retain")
+	cfg, err = FromEnv()
+	if err != nil || cfg.DefaultDeletePolicy != DeleteRetain {
+		t.Fatalf("retain: %+v %v", cfg, err)
+	}
+
 	t.Setenv("DEFAULT_DELETE_POLICY", "whenever")
 	if _, err = FromEnv(); err == nil {
 		t.Fatal("expected invalid policy error")

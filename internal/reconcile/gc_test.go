@@ -25,6 +25,11 @@ func TestDecideGC(t *testing.T) {
 			want:  gcDelete,
 		},
 		{
+			name:  "retain never deletes",
+			state: gcState{Policy: config.DeleteRetain, Grace: time.Hour, MissingSince: &missing},
+			want:  gcRetain,
+		},
+		{
 			name:  "deferred without timestamp stamps",
 			state: gcState{Policy: config.DeleteDeferred, Grace: 24 * time.Hour},
 			want:  gcStamp,
@@ -72,6 +77,17 @@ func TestGCDescriptionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGCDescriptionRetain(t *testing.T) {
+	t.Parallel()
+	got := parseGCDescription(ptrString(formatGCDescription(gcState{
+		Policy: config.DeleteRetain,
+		Grace:  24 * time.Hour,
+	})))
+	if got.Policy != config.DeleteRetain {
+		t.Fatalf("retain description: %+v", got)
+	}
+}
+
 func TestParseGCDescriptionIgnoresJunk(t *testing.T) {
 	t.Parallel()
 	got := parseGCDescription(ptrString("hello world;delete-policy=immediate;delete-grace=90m"))
@@ -101,6 +117,13 @@ func TestPolicyFromAnnotations(t *testing.T) {
 	})
 	if got.Policy != config.DeleteImmediate || got.Grace != 6*time.Hour {
 		t.Fatalf("override: %+v", got)
+	}
+
+	got = r.policyFromAnnotations(map[string]string{
+		annDeletePolicy: "retain",
+	})
+	if got.Policy != config.DeleteRetain {
+		t.Fatalf("retain: %+v", got)
 	}
 
 	got = r.policyFromAnnotations(map[string]string{

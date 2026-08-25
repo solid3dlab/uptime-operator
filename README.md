@@ -39,9 +39,10 @@ runtime package installs. Typical footprint is tens of MiB RAM.
    monitor is **not** dropped immediately by default. The operator keeps
    probing the last URL for `DEFAULT_DELETE_GRACE` (24h) so an accidental
    Helm uninstall — especially with Flux paused — still pages through
-   Kuma. Set `uptime-kuma.io/delete-policy: "immediate"` on an Ingress
-   that should disappear with the object. The policy is written onto the
-   monitor description so it survives Ingress deletion.
+   Kuma. Set `uptime-kuma.io/delete-policy: "immediate"` when the monitor
+   should die with the Ingress, or `"retain"` to never delete it (Kuma
+   keeps probing until a human removes the monitor). The policy is written
+   onto the monitor description so it survives Ingress deletion.
 
 There are **no CRDs** in v1 — configuration is annotations + a ConfigMap.
 That keeps RBAC tiny (read Ingresses only) and the control loop easy to reason
@@ -66,7 +67,7 @@ about.
 | `uptime-kuma.io/host` | first rule | Ingress hostname to probe |
 | `uptime-kuma.io/use-default-notification` | `false` | `"true"` enables Kuma's Default notification(s) on the monitor |
 | `uptime-kuma.io/notification` | — | extra comma-separated Kuma notification channel names |
-| `uptime-kuma.io/delete-policy` | `deferred` | `immediate` removes the monitor with the Ingress; `deferred` waits `delete-grace` |
+| `uptime-kuma.io/delete-policy` | `deferred` | `immediate` removes the monitor with the Ingress; `deferred` waits `delete-grace`; `retain` never deletes |
 | `uptime-kuma.io/delete-grace` | `24h` | how long a deferred orphan stays in Kuma (`24h`, `90m`, or `24` hours) |
 
 `use-default-notification` does not name a channel. It turns on every
@@ -96,7 +97,7 @@ monitors:
 | `KUMA_USERNAME` | yes | login user |
 | `KUMA_PASSWORD` | yes | login password |
 | `RESYNC_INTERVAL` | no | seconds between full syncs (default `300`) |
-| `DEFAULT_DELETE_POLICY` | no | `deferred` (default) or `immediate` for Ingresses without an override |
+| `DEFAULT_DELETE_POLICY` | no | `deferred` (default), `immediate`, or `retain` for Ingresses without an override |
 | `DEFAULT_DELETE_GRACE` | no | deferred orphan lifetime (default `24h`) |
 | `STATIC_MONITORS_PATH` | no | default `/config/monitors.yaml` |
 | `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARN` / `ERROR` |
