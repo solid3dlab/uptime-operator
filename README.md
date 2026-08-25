@@ -42,7 +42,9 @@ runtime package installs. Typical footprint is tens of MiB RAM.
    Kuma. Set `uptime-kuma.io/delete-policy: "immediate"` when the monitor
    should die with the Ingress, or `"retain"` to never delete it (Kuma
    keeps probing until a human removes the monitor). The policy is written
-   onto the monitor description so it survives Ingress deletion.
+   onto the monitor description so it survives Ingress deletion. When the
+   Ingress comes back, the same monitor is updated in place (by name, or
+   by URL if Helm recreated the Ingress with a new name) — never duplicated.
 
 There are **no CRDs** in v1 — configuration is annotations + a ConfigMap.
 That keeps RBAC tiny (read Ingresses only) and the control loop easy to reason

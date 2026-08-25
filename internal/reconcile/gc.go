@@ -199,6 +199,66 @@ func parseGCDescription(desc *string) gcState {
 	return state
 }
 
+// claimManaged finds an existing managed monitor for key. Name wins; otherwise
+// same() can reclaim an orphan (same URL after a Helm uninstall/reinstall).
+// A reclaimed entry is moved onto key so later GC cannot delete it.
+func claimManaged(managed map[string]monitor.Base, key string, same func(monitor.Base) bool) (monitor.Base, string, bool) {
+	if m, ok := managed[key]; ok {
+		return m, key, true
+	}
+	if same == nil {
+		return monitor.Base{}, "", false
+	}
+	for name, m := range managed {
+		if !same(m) {
+			continue
+		}
+		delete(managed, name)
+		managed[key] = m
+		return m, name, true
+	}
+	return monitor.Base{}, "", false
+}
+
+func matchHTTPURL(url string) func(monitor.Base) bool {
+	return func(m monitor.Base) bool {
+		if url == "" {
+			return false
+		}
+		var cur monitor.HTTP
+		if err := m.As(&cur); err != nil {
+			return false
+		}
+		return cur.URL == url
+	}
+}
+
+func matchPingHost(host string) func(monitor.Base) bool {
+	return func(m monitor.Base) bool {
+		if host == "" {
+			return false
+		}
+		var cur monitor.Ping
+		if err := m.As(&cur); err != nil {
+			return false
+		}
+		return cur.Hostname == host
+	}
+}
+
+func matchPort(host string, port int) func(monitor.Base) bool {
+	return func(m monitor.Base) bool {
+		if host == "" || port == 0 {
+			return false
+		}
+		var cur monitor.TCPPort
+		if err := m.As(&cur); err != nil {
+			return false
+		}
+		return cur.Hostname == host && cur.Port == port
+	}
+}
+
 func formatGrace(d time.Duration) string {
 	if d <= 0 {
 		return "24h"

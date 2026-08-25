@@ -77,6 +77,37 @@ func TestGCDescriptionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClaimManagedReusesNameThenURL(t *testing.T) {
+	t.Parallel()
+	byName := monitor.Base{ID: 1, Name: "ns/Ingress/app"}
+	orphan := monitor.Base{ID: 2, Name: "ns/Ingress/old"}
+	managed := map[string]monitor.Base{
+		"ns/Ingress/app": byName,
+		"ns/Ingress/old": orphan,
+	}
+
+	got, from, ok := claimManaged(managed, "ns/Ingress/app", func(monitor.Base) bool { return true })
+	if !ok || got.ID != 1 || from != "ns/Ingress/app" {
+		t.Fatalf("name must win: id=%d from=%s ok=%v", got.ID, from, ok)
+	}
+
+	managed = map[string]monitor.Base{"ns/Ingress/old": orphan}
+	got, from, ok = claimManaged(managed, "ns/Ingress/app", func(m monitor.Base) bool { return m.ID == 2 })
+	if !ok || got.ID != 2 || from != "ns/Ingress/old" {
+		t.Fatalf("url reclaim: id=%d from=%s ok=%v", got.ID, from, ok)
+	}
+	if _, still := managed["ns/Ingress/old"]; still {
+		t.Fatal("reclaimed orphan must leave the old key so GC cannot delete it")
+	}
+	if managed["ns/Ingress/app"].ID != 2 {
+		t.Fatal("reclaimed monitor must be indexed under the live key")
+	}
+
+	if _, _, ok = claimManaged(map[string]monitor.Base{}, "ns/Ingress/app", nil); ok {
+		t.Fatal("missing monitor must not claim")
+	}
+}
+
 func TestGCDescriptionRetain(t *testing.T) {
 	t.Parallel()
 	got := parseGCDescription(ptrString(formatGCDescription(gcState{

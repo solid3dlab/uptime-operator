@@ -384,7 +384,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 }
 
 func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monitor.HTTP, managed map[string]monitor.Base) error {
-	existing, ok := managed[key]
+	existing, from, ok := claimManaged(managed, key, matchHTTPURL(desired.URL))
 	if !ok {
 		r.log.Info("creating monitor", "key", key, "url", desired.URL)
 		id, err := r.kuma.CreateMonitor(ctx, desired)
@@ -396,12 +396,12 @@ func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monito
 	}
 
 	var cur monitor.HTTP
-	if err := existing.As(&cur); err != nil {
-		if existing.Interval == desired.Interval {
-			return nil
-		}
-	} else if !httpNeedsUpdate(cur, existing, desired) {
+	asOK := existing.As(&cur) == nil
+	if from == key && asOK && !httpNeedsUpdate(cur, existing, desired) {
 		return nil
+	}
+	if from != key {
+		r.log.Info("reclaiming monitor", "key", key, "from", from, "id", existing.ID, "url", desired.URL)
 	}
 
 	desired.ID = existing.ID
@@ -410,7 +410,7 @@ func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monito
 }
 
 func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monitor.Ping, managed map[string]monitor.Base) error {
-	existing, ok := managed[key]
+	existing, from, ok := claimManaged(managed, key, matchPingHost(desired.Hostname))
 	if !ok {
 		r.log.Info("creating ping monitor", "key", key, "hostname", desired.Hostname)
 		id, err := r.kuma.CreateMonitor(ctx, desired)
@@ -422,17 +422,20 @@ func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monito
 	}
 	var cur monitor.Ping
 	_ = existing.As(&cur)
-	if cur.Hostname == desired.Hostname && existing.Interval == desired.Interval &&
+	if from == key && cur.Hostname == desired.Hostname && existing.Interval == desired.Interval &&
 		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) &&
 		descriptionEqual(existing.Description, desired.Description) {
 		return nil
+	}
+	if from != key {
+		r.log.Info("reclaiming ping monitor", "key", key, "from", from, "id", existing.ID)
 	}
 	desired.ID = existing.ID
 	return r.kuma.UpdateMonitor(ctx, desired)
 }
 
 func (r *Reconciler) ensurePort(ctx context.Context, key string, desired *monitor.TCPPort, managed map[string]monitor.Base) error {
-	existing, ok := managed[key]
+	existing, from, ok := claimManaged(managed, key, matchPort(desired.Hostname, desired.Port))
 	if !ok {
 		r.log.Info("creating port monitor", "key", key, "hostname", desired.Hostname, "port", desired.Port)
 		id, err := r.kuma.CreateMonitor(ctx, desired)
@@ -444,10 +447,13 @@ func (r *Reconciler) ensurePort(ctx context.Context, key string, desired *monito
 	}
 	var cur monitor.TCPPort
 	_ = existing.As(&cur)
-	if cur.Hostname == desired.Hostname && cur.Port == desired.Port && existing.Interval == desired.Interval &&
+	if from == key && cur.Hostname == desired.Hostname && cur.Port == desired.Port && existing.Interval == desired.Interval &&
 		notificationIDsEqual(existing.NotificationIDs, desired.NotificationIDs) &&
 		descriptionEqual(existing.Description, desired.Description) {
 		return nil
+	}
+	if from != key {
+		r.log.Info("reclaiming port monitor", "key", key, "from", from, "id", existing.ID)
 	}
 	desired.ID = existing.ID
 	return r.kuma.UpdateMonitor(ctx, desired)
