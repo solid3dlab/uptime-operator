@@ -130,6 +130,11 @@ Upstream:
 A failed login with an empty error (`login: login: `) usually means the
 user has 2FA enabled.
 
+Socket.IO connect is capped at 45s and a full reconcile at 2 minutes. On
+timeout the loop logs `reconcile` and retries after 30s. Without those
+bounds a stalled handshake blocks the process forever: kubelet sees a
+Ready pod with no liveness probe, and monitors stop updating.
+
 ## Build
 
 ```bash

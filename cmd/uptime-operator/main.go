@@ -62,9 +62,20 @@ func main() {
 	log.Info("shutting down")
 }
 
+// connectTimeout bounds the Socket.IO handshake. The process ctx only
+// cancels on SIGTERM, so a stalled Kuma websocket would otherwise hang
+// the loop forever.
+const connectTimeout = 45 * time.Second
+
+// reconcileTimeout covers tag lookup plus monitor upsert after connect.
+const reconcileTimeout = 2 * time.Minute
+
 func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, log *slog.Logger) error {
+	runCtx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
+
 	log.Info("connecting to uptime kuma", "url", cfg.KumaURL)
-	client, err := kuma.New(ctx, cfg.KumaURL, cfg.KumaUsername, cfg.KumaPassword)
+	client, err := kuma.New(runCtx, cfg.KumaURL, cfg.KumaUsername, cfg.KumaPassword, kuma.WithConnectTimeout(connectTimeout))
 	if err != nil {
 		return err
 	}
@@ -75,10 +86,10 @@ func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressListe
 	}()
 
 	rec := reconcile.New(cfg, ings, client, log)
-	if err := rec.EnsureManagedTag(ctx); err != nil {
+	if err := rec.EnsureManagedTag(runCtx); err != nil {
 		return err
 	}
-	return rec.ReconcileOnce(ctx)
+	return rec.ReconcileOnce(runCtx)
 }
 
 func newIngressLister() (reconcile.IngressLister, error) {
