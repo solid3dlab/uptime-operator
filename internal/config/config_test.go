@@ -71,3 +71,20 @@ func TestFromEnvDeleteDefaults(t *testing.T) {
 		t.Fatal("expected invalid policy error")
 	}
 }
+
+func TestLegacyManagedTag(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, managed, explicit, want string
+	}{
+		{"default tag has no legacy", DefaultManagedTag, "", ""},
+		{"per-cluster tag falls back to the shared default", "managed-by-uptime-operator:solid3d", "", DefaultManagedTag},
+		{"explicit legacy wins", "solid3d", "old-tag", "old-tag"},
+		{"legacy equal to own tag is ignored", "solid3d", "solid3d", ""},
+	}
+	for _, tc := range cases {
+		if got := legacyManagedTag(tc.managed, tc.explicit); got != tc.want {
+			t.Fatalf("%s: legacyManagedTag(%q, %q) = %q, want %q", tc.name, tc.managed, tc.explicit, got, tc.want)
+		}
+	}
+}

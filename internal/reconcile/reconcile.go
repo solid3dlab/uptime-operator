@@ -67,6 +67,7 @@ type Reconciler struct {
 	now           func() time.Time
 	tagID         int64
 	groups        map[string]int64
+	legacy        map[string]monitor.Base
 	notifications []notification.Base
 }
 
@@ -199,26 +200,71 @@ func (r *Reconciler) managedMonitors(ctx context.Context) (map[string]monitor.Ba
 		return nil, fmt.Errorf("get monitors: %w", err)
 	}
 	r.groups = make(map[string]int64)
-	out := make(map[string]monitor.Base)
 	for _, m := range mons {
 		if m.Type() == "group" {
 			r.groups[m.Name] = m.ID
 		}
-		if hasTag(m.Tags, r.cfg.ManagedTag) {
-			out[m.Name] = m
-			continue
-		}
-		// Adopt reconciler-style names that lost their tag (crash between add+tag).
-		if r.tagID != 0 && strings.Contains(m.Name, "/") {
+	}
+	owned, legacy, untagged := classifyMonitors(mons, r.cfg.ManagedTag, r.cfg.LegacyManagedTag)
+	r.legacy = legacy
+	if r.tagID != 0 {
+		for _, m := range untagged {
 			r.log.Info("adopting untagged monitor", "name", m.Name, "id", m.ID)
 			if _, err := r.kuma.AddMonitorTag(ctx, r.tagID, m.ID, ""); err != nil {
 				r.log.Warn("adopt failed", "name", m.Name, "err", err)
 				continue
 			}
-			out[m.Name] = m
+			owned[m.Name] = m
 		}
 	}
-	return out, nil
+	return owned, nil
+}
+
+// classifyMonitors splits Kuma monitors by ownership. untagged holds
+// reconciler-style names with no tag at all (crash between create and tag).
+// A monitor with any other tag may belong to another cluster's operator.
+func classifyMonitors(mons []monitor.Base, ownTag, legacyTag string) (owned, legacy map[string]monitor.Base, untagged []monitor.Base) {
+	owned = make(map[string]monitor.Base)
+	legacy = make(map[string]monitor.Base)
+	for _, m := range mons {
+		switch {
+		case hasTag(m.Tags, ownTag):
+			owned[m.Name] = m
+		case legacyTag != "" && hasTag(m.Tags, legacyTag):
+			legacy[m.Name] = m
+		case len(m.Tags) == 0 && strings.Contains(m.Name, "/"):
+			untagged = append(untagged, m)
+		}
+	}
+	return owned, legacy, untagged
+}
+
+// claim returns the managed monitor for key. A legacy monitor is claimed only
+// when name and target both match, since other clusters reuse the same keys.
+// It keeps the legacy tag so operators that still use it do not re-adopt it.
+func (r *Reconciler) claim(ctx context.Context, managed map[string]monitor.Base, key string, same func(monitor.Base) bool) (monitor.Base, string, bool, error) {
+	if m, from, ok := claimManaged(managed, key, same); ok {
+		return m, from, true, nil
+	}
+	m, ok := claimLegacy(r.legacy, key, same)
+	if !ok {
+		return monitor.Base{}, "", false, nil
+	}
+	r.log.Info("claiming legacy monitor", "key", key, "id", m.ID, "tag", r.cfg.LegacyManagedTag)
+	if _, err := r.kuma.AddMonitorTag(ctx, r.tagID, m.ID, ""); err != nil {
+		return monitor.Base{}, "", false, fmt.Errorf("tag legacy monitor %d: %w", m.ID, err)
+	}
+	delete(r.legacy, key)
+	managed[key] = m
+	return m, key, true, nil
+}
+
+func claimLegacy(legacy map[string]monitor.Base, key string, same func(monitor.Base) bool) (monitor.Base, bool) {
+	m, ok := legacy[key]
+	if !ok || same == nil || !same(m) {
+		return monitor.Base{}, false
+	}
+	return m, true
 }
 
 func (r *Reconciler) reconcileHTTPRoute(ctx context.Context, route *gatewayv1.HTTPRoute, managed map[string]monitor.Base) error {
@@ -438,7 +484,10 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 }
 
 func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monitor.HTTP, managed map[string]monitor.Base) error {
-	existing, from, ok := claimManaged(managed, key, matchHTTPURL(desired.URL))
+	existing, from, ok, err := r.claim(ctx, managed, key, matchHTTPURL(desired.URL))
+	if err != nil {
+		return err
+	}
 	if !ok {
 		r.log.Info("creating monitor", "key", key, "url", desired.URL)
 		id, err := r.kuma.CreateMonitor(ctx, desired)
@@ -464,7 +513,10 @@ func (r *Reconciler) ensureHTTP(ctx context.Context, key string, desired *monito
 }
 
 func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monitor.Ping, managed map[string]monitor.Base) error {
-	existing, from, ok := claimManaged(managed, key, matchPingHost(desired.Hostname))
+	existing, from, ok, err := r.claim(ctx, managed, key, matchPingHost(desired.Hostname))
+	if err != nil {
+		return err
+	}
 	if !ok {
 		r.log.Info("creating ping monitor", "key", key, "hostname", desired.Hostname)
 		id, err := r.kuma.CreateMonitor(ctx, desired)
@@ -489,7 +541,10 @@ func (r *Reconciler) ensurePing(ctx context.Context, key string, desired *monito
 }
 
 func (r *Reconciler) ensurePort(ctx context.Context, key string, desired *monitor.TCPPort, managed map[string]monitor.Base) error {
-	existing, from, ok := claimManaged(managed, key, matchPort(desired.Hostname, desired.Port))
+	existing, from, ok, err := r.claim(ctx, managed, key, matchPort(desired.Hostname, desired.Port))
+	if err != nil {
+		return err
+	}
 	if !ok {
 		r.log.Info("creating port monitor", "key", key, "hostname", desired.Hostname, "port", desired.Port)
 		id, err := r.kuma.CreateMonitor(ctx, desired)

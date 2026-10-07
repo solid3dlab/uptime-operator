@@ -19,6 +19,10 @@ const (
 	DeleteRetain = "retain"
 )
 
+// DefaultManagedTag is the ownership tag of operators that do not set
+// MANAGED_TAG. Several clusters on one Kuma must each set their own.
+const DefaultManagedTag = "managed-by-uptime-operator"
+
 // ValidDeletePolicy reports whether v is an accepted delete-policy value.
 func ValidDeletePolicy(v string) bool {
 	switch v {
@@ -31,12 +35,15 @@ func ValidDeletePolicy(v string) bool {
 
 // Config is loaded from environment variables.
 type Config struct {
-	KumaURL             string
-	KumaUsername        string
-	KumaPassword        string
-	ResyncInterval      time.Duration
-	StaticMonitorsPath  string
-	ManagedTag          string
+	KumaURL            string
+	KumaUsername       string
+	KumaPassword       string
+	ResyncInterval     time.Duration
+	StaticMonitorsPath string
+	ManagedTag         string
+	// LegacyManagedTag marks monitors from before per-cluster tags. They are
+	// claimed only when this cluster has the same object and are never deleted.
+	LegacyManagedTag    string
 	ManagedTagColor     string
 	DefaultDeletePolicy string
 	DefaultDeleteGrace  time.Duration
@@ -49,12 +56,13 @@ func FromEnv() (Config, error) {
 		KumaUsername:        os.Getenv("KUMA_USERNAME"),
 		KumaPassword:        os.Getenv("KUMA_PASSWORD"),
 		StaticMonitorsPath:  envOr("STATIC_MONITORS_PATH", "/config/monitors.yaml"),
-		ManagedTag:          envOr("MANAGED_TAG", "managed-by-uptime-operator"),
+		ManagedTag:          envOr("MANAGED_TAG", DefaultManagedTag),
 		ManagedTagColor:     envOr("MANAGED_TAG_COLOR", "#2563eb"),
 		DefaultDeletePolicy: DeleteDeferred,
 		DefaultDeleteGrace:  24 * time.Hour,
 		ResyncInterval:      5 * time.Minute,
 	}
+	cfg.LegacyManagedTag = legacyManagedTag(cfg.ManagedTag, os.Getenv("LEGACY_MANAGED_TAG"))
 
 	if cfg.KumaURL == "" || cfg.KumaUsername == "" || cfg.KumaPassword == "" {
 		return Config{}, fmt.Errorf("KUMA_URL, KUMA_USERNAME, and KUMA_PASSWORD are required")
@@ -103,6 +111,17 @@ func ParseGrace(raw string) (time.Duration, error) {
 		return 0, fmt.Errorf("want Go duration or positive hours, got %q", raw)
 	}
 	return time.Duration(hours * float64(time.Hour)), nil
+}
+
+func legacyManagedTag(managed, explicit string) string {
+	legacy := strings.TrimSpace(explicit)
+	if legacy == "" && managed != DefaultManagedTag {
+		legacy = DefaultManagedTag
+	}
+	if legacy == managed {
+		return ""
+	}
+	return legacy
 }
 
 func envOr(key, fallback string) string {

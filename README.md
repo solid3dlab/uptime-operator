@@ -33,8 +33,11 @@ runtime package installs. Typical footprint is tens of MiB RAM.
    enables whatever channel is marked **Default** in Kuma — the operator
    never takes that channel's name. `uptime-kuma.io/notification` attaches
    extra channels by name.
-3. Monitors it owns are tagged `managed-by-uptime-operator`. Manual monitors
-   without that tag are never touched.
+3. Monitors it owns carry `MANAGED_TAG` (default `managed-by-uptime-operator`).
+   Monitors with any other tag are never touched. Only a reconciler-style
+   name with no tag at all is adopted (a crash between create and tag).
+   When several clusters share one Kuma, give each its own `MANAGED_TAG`,
+   or every operator treats the others' monitors as its own orphans.
 4. If a route loses the annotation or is deleted, the matching managed
    monitor is **not** dropped immediately by default. The operator keeps
    probing the last URL for `DEFAULT_DELETE_GRACE` (24h) so an accidental
@@ -108,6 +111,8 @@ monitors:
 | `RESYNC_INTERVAL` | no | seconds between full syncs (default `300`) |
 | `DEFAULT_DELETE_POLICY` | no | `deferred` (default), `immediate`, or `retain` for Ingresses without an override |
 | `DEFAULT_DELETE_GRACE` | no | deferred orphan lifetime (default `24h`) |
+| `MANAGED_TAG` | no | ownership tag, unique per cluster on a shared Kuma (default `managed-by-uptime-operator`) |
+| `LEGACY_MANAGED_TAG` | no | tag of monitors from before per-cluster tags. Defaults to `managed-by-uptime-operator` when `MANAGED_TAG` is changed. Such a monitor is claimed only when its name and URL or host match an object in this cluster; it keeps the old tag and is never deleted by this operator |
 | `STATIC_MONITORS_PATH` | no | default `/config/monitors.yaml` |
 | `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARN` / `ERROR` |
 | `GOMEMLIMIT` | no | Go heap cap (e.g. `58MiB`). Unset: 90% of the container memory limit |
