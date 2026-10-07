@@ -1,7 +1,7 @@
 # uptime-operator
 
 A tiny Kubernetes controller that keeps [Uptime Kuma](https://github.com/louislam/uptime-kuma)
-HTTP monitors in sync with annotated Ingresses.
+HTTP monitors in sync with annotated HTTPRoutes and Ingresses.
 
 Designed for lean clusters: single static Go binary on `scratch`, no pip, no
 runtime package installs. Typical footprint is tens of MiB RAM.
@@ -9,7 +9,7 @@ runtime package installs. Typical footprint is tens of MiB RAM.
 ## How it works
 
 ```text
-┌─────────────┐  list Ingresses   ┌──────────────────┐
+┌─────────────┐  list routes      ┌──────────────────┐
 │ Kubernetes  │ ─────────────────►│  uptime-operator │
 │ API server  │                   │  (this binary)   │
 └─────────────┘                   └────────┬─────────┘
@@ -24,10 +24,10 @@ runtime package installs. Typical footprint is tens of MiB RAM.
 
 1. Every `RESYNC_INTERVAL` seconds (default 300), the operator:
    - connects to Uptime Kuma over Socket.IO, syncs, then disconnects
-   - lists all cluster Ingresses
+   - lists all cluster HTTPRoutes and Ingresses
    - loads optional static monitors from `/config/monitors.yaml`
-2. For each Ingress with `uptime-kuma.io/monitor: "true"`, it ensures a
-   monitor named `namespace/Ingress/name` exists with the right URL/interval
+2. For each HTTPRoute or Ingress with `uptime-kuma.io/monitor: "true"`, it ensures a
+   monitor named `namespace/HTTPRoute/name` or `namespace/Ingress/name` exists with the right URL/interval
    and notification channels. Kuma's UI enables Default channels on create;
    Socket.IO does not. `uptime-kuma.io/use-default-notification: "true"`
    enables whatever channel is marked **Default** in Kuma — the operator
@@ -35,20 +35,27 @@ runtime package installs. Typical footprint is tens of MiB RAM.
    extra channels by name.
 3. Monitors it owns are tagged `managed-by-uptime-operator`. Manual monitors
    without that tag are never touched.
-4. If an Ingress loses the annotation or is deleted, the matching managed
+4. If a route loses the annotation or is deleted, the matching managed
    monitor is **not** dropped immediately by default. The operator keeps
    probing the last URL for `DEFAULT_DELETE_GRACE` (24h) so an accidental
    Helm uninstall — especially with Flux paused — still pages through
    Kuma. Set `uptime-kuma.io/delete-policy: "immediate"` when the monitor
    should die with the Ingress, or `"retain"` to never delete it (Kuma
    keeps probing until a human removes the monitor). The policy is written
-   onto the monitor description so it survives Ingress deletion. When the
-   Ingress comes back, the same monitor is updated in place (by name, or
-   by URL if Helm recreated the Ingress with a new name) — never duplicated.
+   onto the monitor description so it survives route deletion. When the
+   route comes back, the same monitor is updated in place (by name, or
+   by URL if the object was recreated with a new name) — never duplicated.
+
+An HTTPRoute attached to an `https` listener (or with no section name) is
+probed as `https`. A listener section that is only `http` stays `http`.
+An Ingress is `https` only when that host is listed in `spec.tls`.
+
+Ingresses with class `uptime-only` are a bridge for an operator image that
+cannot list HTTPRoutes yet. Once the HTTPRoute list succeeds, that class is
+ignored so the two objects do not rename one monitor every sync.
 
 There are **no CRDs** in v1 — configuration is annotations + a ConfigMap.
-That keeps RBAC tiny (read Ingresses only) and the control loop easy to reason
-about.
+RBAC is list/watch on Ingresses and HTTPRoutes.
 
 ## Annotations
 
@@ -59,14 +66,14 @@ about.
 | `uptime-kuma.io/monitor-group` | — | Kuma group name (created if missing) |
 | `uptime-kuma.io/monitor-type` | `http` | reserved; Ingress path is HTTP |
 | `uptime-kuma.io/ignore-tls` | `false` | `"true"` skips TLS verify and cert/domain expiry alerts (Let's Encrypt staging) |
-| `uptime-kuma.io/path` | `/` | path appended to the Ingress host |
+| `uptime-kuma.io/path` | `/` | path appended to the host |
 | `uptime-kuma.io/method` | `GET` | HTTP method (`GET`, `HEAD`, …) |
 | `uptime-kuma.io/accepted-status-codes` | `200-299` | comma-separated ranges or codes |
 | `uptime-kuma.io/max-redirects` | `10` | follow this many redirects |
 | `uptime-kuma.io/timeout` | `48` | request timeout (seconds) |
 | `uptime-kuma.io/retry-interval` | `60` | seconds between retries after a failure |
 | `uptime-kuma.io/max-retries` | `3` | retries before the monitor is DOWN |
-| `uptime-kuma.io/host` | first rule | Ingress hostname to probe |
+| `uptime-kuma.io/host` | first hostname | hostname to probe |
 | `uptime-kuma.io/use-default-notification` | `false` | `"true"` enables Kuma's Default notification(s) on the monitor |
 | `uptime-kuma.io/notification` | — | extra comma-separated Kuma notification channel names |
 | `uptime-kuma.io/delete-policy` | `deferred` | `immediate` removes the monitor with the Ingress; `deferred` waits `delete-grace`; `retain` never deletes |
@@ -75,7 +82,7 @@ about.
 `use-default-notification` does not name a channel. It turns on every
 active Kuma notification with **Default** checked, the same as the UI on
 create. Named channels are matched case-insensitively; missing names fail
-that Ingress's reconcile. The two annotations can be combined.
+that route's reconcile. The two annotations can be combined.
 
 Static monitors use the same knobs:
 

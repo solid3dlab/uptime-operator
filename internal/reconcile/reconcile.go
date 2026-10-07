@@ -17,14 +17,27 @@ import (
 	"gopkg.in/yaml.v3"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/solid3dlab/uptime-operator/internal/config"
 )
 
-// IngressLister is the only Kubernetes API the operator needs.
+// IngressLister lists Ingresses. HTTPRouteLister lists HTTPRoutes.
+// A nil HTTPRouteLister keeps the Ingress-only behavior.
 type IngressLister interface {
 	List(ctx context.Context, opts metav1.ListOptions) (*networkingv1.IngressList, error)
 }
+
+type HTTPRouteLister interface {
+	List(ctx context.Context, opts metav1.ListOptions) (*gatewayv1.HTTPRouteList, error)
+}
+
+// uptimeOnlyIngressClass is a bridge for operators that cannot list
+// HTTPRoutes yet. Those Ingresses carry tls.hosts so the probe stays https,
+// and no secret, so cert-manager ignores them. Once HTTPRoutes list
+// successfully, this class is skipped so the two objects do not rename the
+// same Kuma monitor back and forth.
+const uptimeOnlyIngressClass = "uptime-only"
 
 const (
 	annEnabled                = "uptime-kuma.io/monitor"
@@ -44,10 +57,11 @@ const (
 	annNotification           = "uptime-kuma.io/notification"
 )
 
-// Reconciler syncs annotated Ingresses and static YAML into Uptime Kuma.
+// Reconciler syncs annotated HTTPRoutes, Ingresses, and static YAML into Uptime Kuma.
 type Reconciler struct {
 	cfg           config.Config
 	k8s           IngressLister
+	routes        HTTPRouteLister
 	kuma          *kuma.Client
 	log           *slog.Logger
 	now           func() time.Time
@@ -57,16 +71,18 @@ type Reconciler struct {
 }
 
 // New builds a reconciler bound to an authenticated Kuma client.
-func New(cfg config.Config, k8s IngressLister, client *kuma.Client, log *slog.Logger) *Reconciler {
+// routes may be nil.
+func New(cfg config.Config, k8s IngressLister, routes HTTPRouteLister, client *kuma.Client, log *slog.Logger) *Reconciler {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Reconciler{
-		cfg:  cfg,
-		k8s:  k8s,
-		kuma: client,
-		log:  log,
-		now:  func() time.Time { return time.Now().UTC() },
+		cfg:    cfg,
+		k8s:    k8s,
+		routes: routes,
+		kuma:   client,
+		log:    log,
+		now:    func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -114,13 +130,40 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		seen[k] = struct{}{}
 	}
 
+	orphanAnns := map[string]map[string]string{}
+	routesReady := false
+	routeCount := 0
+	if r.routes != nil {
+		routes, err := r.routes.List(ctx, metav1.ListOptions{})
+		if err != nil {
+			r.log.Error("list httproutes", "err", err)
+		} else {
+			routesReady = true
+			routeCount = len(routes.Items)
+			for i := range routes.Items {
+				route := &routes.Items[i]
+				key := monitorKey(route.Namespace, "HTTPRoute", route.Name)
+				if !strings.EqualFold(route.Annotations[annEnabled], "true") {
+					orphanAnns[key] = route.Annotations
+					continue
+				}
+				seen[key] = struct{}{}
+				if err := r.reconcileHTTPRoute(ctx, route, managed); err != nil {
+					r.log.Error("reconcile httproute", "key", key, "err", err)
+				}
+			}
+		}
+	}
+
 	ings, err := r.k8s.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list ingresses: %w", err)
 	}
-	orphanAnns := map[string]map[string]string{}
 	for i := range ings.Items {
 		ing := &ings.Items[i]
+		if skipBridgeIngress(ingressClassName(ing), routesReady) {
+			continue
+		}
 		key := monitorKey(ing.Namespace, "Ingress", ing.Name)
 		if !strings.EqualFold(ing.Annotations[annEnabled], "true") {
 			orphanAnns[key] = ing.Annotations
@@ -143,6 +186,7 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 
 	r.log.Info("reconciliation complete",
 		"ingresses", len(ings.Items),
+		"httproutes", routeCount,
 		"static", len(staticKeys),
 		"seen", len(seen),
 	)
@@ -177,52 +221,62 @@ func (r *Reconciler) managedMonitors(ctx context.Context) (map[string]monitor.Ba
 	return out, nil
 }
 
+func (r *Reconciler) reconcileHTTPRoute(ctx context.Context, route *gatewayv1.HTTPRoute, managed map[string]monitor.Base) error {
+	key := monitorKey(route.Namespace, "HTTPRoute", route.Name)
+	url, err := extractHTTPRouteURL(route, route.Annotations[annPath], route.Annotations[annHost])
+	if err != nil {
+		return err
+	}
+	return r.reconcileAnnotated(ctx, key, url, route.Annotations, managed)
+}
+
 func (r *Reconciler) reconcileIngress(ctx context.Context, ing *networkingv1.Ingress, managed map[string]monitor.Base) error {
 	key := monitorKey(ing.Namespace, "Ingress", ing.Name)
-
 	url, err := extractIngressURL(ing, ing.Annotations[annPath], ing.Annotations[annHost])
 	if err != nil {
 		return err
 	}
+	return r.reconcileAnnotated(ctx, key, url, ing.Annotations, managed)
+}
 
-	interval := parseInt64(ing.Annotations[annInterval], 60, 20)
-	ignoreTLS := parseBool(ing.Annotations[annIgnoreTLS])
-	group := ing.Annotations[annGroup]
-	parent, err := r.ensureGroup(ctx, group)
+func (r *Reconciler) reconcileAnnotated(ctx context.Context, key, url string, anns map[string]string, managed map[string]monitor.Base) error {
+	interval := parseInt64(anns[annInterval], 60, 20)
+	ignoreTLS := parseBool(anns[annIgnoreTLS])
+	parent, err := r.ensureGroup(ctx, anns[annGroup])
 	if err != nil {
 		return err
 	}
-	useDefaultNotification := parseBool(ing.Annotations[annUseDefaultNotification])
+	useDefaultNotification := parseBool(anns[annUseDefaultNotification])
 	notificationIDs, err := resolveNotificationIDs(
 		r.notifications,
 		useDefaultNotification,
-		parseCSV(ing.Annotations[annNotification]),
+		parseCSV(anns[annNotification]),
 	)
 	if err != nil {
 		return err
 	}
-	if useDefaultNotification && len(notificationIDs) == 0 && strings.TrimSpace(ing.Annotations[annNotification]) == "" {
+	if useDefaultNotification && len(notificationIDs) == 0 && strings.TrimSpace(anns[annNotification]) == "" {
 		r.log.Warn("use-default-notification set but no default Kuma channel exists", "key", key)
 	}
 
 	desired := &monitor.HTTP{
 		Base: monitor.Base{
 			Name:            key,
-			Description:     ptrString(formatGCDescription(r.policyFromAnnotations(ing.Annotations))),
+			Description:     ptrString(formatGCDescription(r.policyFromAnnotations(anns))),
 			Interval:        interval,
-			RetryInterval:   parseInt64(ing.Annotations[annRetryInterval], 60, 1),
-			MaxRetries:      parseInt64(ing.Annotations[annMaxRetries], 3, 0),
+			RetryInterval:   parseInt64(anns[annRetryInterval], 60, 1),
+			MaxRetries:      parseInt64(anns[annMaxRetries], 3, 0),
 			IsActive:        true,
 			Parent:          parent,
 			NotificationIDs: notificationIDs,
 		},
 		HTTPDetails: monitor.HTTPDetails{
 			URL:                      url,
-			Method:                   parseMethod(ing.Annotations[annMethod]),
-			AcceptedStatusCodes:      parseStatusCodes(ing.Annotations[annAcceptedStatusCodes]),
-			MaxRedirects:             parseInt(ing.Annotations[annMaxRedirects], 10),
+			Method:                   parseMethod(anns[annMethod]),
+			AcceptedStatusCodes:      parseStatusCodes(anns[annAcceptedStatusCodes]),
+			MaxRedirects:             parseInt(anns[annMaxRedirects], 10),
 			IgnoreTLS:                ignoreTLS,
-			Timeout:                  parseInt64(ing.Annotations[annTimeout], 48, 1),
+			Timeout:                  float64(parseInt64(anns[annTimeout], 48, 1)),
 			ExpiryNotification:       !ignoreTLS,
 			DomainExpiryNotification: !ignoreTLS,
 		},
@@ -331,7 +385,7 @@ func (r *Reconciler) reconcileStatic(ctx context.Context, managed map[string]mon
 				HTTPDetails: monitor.HTTPDetails{
 					URL: entry.URL, Method: parseMethod(entry.Method),
 					AcceptedStatusCodes: codes, MaxRedirects: redirects, IgnoreTLS: entry.IgnoreTLS,
-					Timeout: timeout, ExpiryNotification: !entry.IgnoreTLS, DomainExpiryNotification: !entry.IgnoreTLS,
+					Timeout: float64(timeout), ExpiryNotification: !entry.IgnoreTLS, DomainExpiryNotification: !entry.IgnoreTLS,
 				},
 			}
 			if entry.URL == "" {
@@ -482,6 +536,60 @@ func (r *Reconciler) ensureGroup(ctx context.Context, name string) (*int64, erro
 
 func monitorKey(ns, kind, name string) string {
 	return fmt.Sprintf("%s/%s/%s", ns, kind, name)
+}
+
+func ingressClassName(ing *networkingv1.Ingress) string {
+	if ing.Spec.IngressClassName != nil {
+		return *ing.Spec.IngressClassName
+	}
+	return ing.Annotations["kubernetes.io/ingress.class"]
+}
+
+func skipBridgeIngress(class string, httpRoutesReady bool) bool {
+	return httpRoutesReady && class == uptimeOnlyIngressClass
+}
+
+func extractHTTPRouteURL(route *gatewayv1.HTTPRoute, path, preferredHost string) (string, error) {
+	scheme := "https"
+	if httpRouteIsHTTPOnly(route) {
+		scheme = "http"
+	}
+	var hosts []string
+	for _, h := range route.Spec.Hostnames {
+		host := strings.TrimSpace(string(h))
+		if host == "" || strings.Contains(host, "*") {
+			continue
+		}
+		hosts = append(hosts, host)
+	}
+	preferredHost = strings.TrimSpace(preferredHost)
+	urlFor := func(host string) string {
+		return joinURL(scheme+"://"+host, path)
+	}
+	if preferredHost != "" {
+		for _, host := range hosts {
+			if host == preferredHost {
+				return urlFor(host), nil
+			}
+		}
+		return "", fmt.Errorf("host %q not on httproute", preferredHost)
+	}
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("no host on httproute")
+	}
+	return urlFor(hosts[0]), nil
+}
+
+func httpRouteIsHTTPOnly(route *gatewayv1.HTTPRoute) bool {
+	if len(route.Spec.ParentRefs) == 0 {
+		return false
+	}
+	for _, ref := range route.Spec.ParentRefs {
+		if ref.SectionName == nil || *ref.SectionName == "" || *ref.SectionName == "https" {
+			return false
+		}
+	}
+	return true
 }
 
 func extractIngressURL(ing *networkingv1.Ingress, path, preferredHost string) (string, error) {

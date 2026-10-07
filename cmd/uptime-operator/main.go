@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,9 +13,13 @@ import (
 	"time"
 
 	kuma "github.com/breml/go-uptime-kuma-client"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	networkingclient "k8s.io/client-go/kubernetes/typed/networking/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/solid3dlab/uptime-operator/internal/config"
 	"github.com/solid3dlab/uptime-operator/internal/reconcile"
@@ -39,7 +44,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	ings, err := newIngressLister()
+	kubeCfg, err := kubeConfig()
+	if err != nil {
+		log.Error("kubernetes client", "err", err)
+		os.Exit(1)
+	}
+	ings, err := newIngressLister(kubeCfg)
+	if err != nil {
+		log.Error("kubernetes client", "err", err)
+		os.Exit(1)
+	}
+	routes, err := newHTTPRouteLister(kubeCfg)
 	if err != nil {
 		log.Error("kubernetes client", "err", err)
 		os.Exit(1)
@@ -50,7 +65,7 @@ func main() {
 			break
 		}
 		wait := cfg.ResyncInterval
-		if err := runOnce(ctx, cfg, ings, log); err != nil {
+		if err := runOnce(ctx, cfg, ings, routes, log); err != nil {
 			log.Error("reconcile", "err", err)
 			wait = 30 * time.Second
 		}
@@ -70,7 +85,7 @@ const connectTimeout = 45 * time.Second
 // reconcileTimeout covers tag lookup plus monitor upsert after connect.
 const reconcileTimeout = 2 * time.Minute
 
-func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, log *slog.Logger) error {
+func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressLister, routes reconcile.HTTPRouteLister, log *slog.Logger) error {
 	runCtx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
@@ -85,28 +100,63 @@ func runOnce(ctx context.Context, cfg config.Config, ings reconcile.IngressListe
 		debug.FreeOSMemory()
 	}()
 
-	rec := reconcile.New(cfg, ings, client, log)
+	rec := reconcile.New(cfg, ings, routes, client, log)
 	if err := rec.EnsureManagedTag(runCtx); err != nil {
 		return err
 	}
 	return rec.ReconcileOnce(runCtx)
 }
 
-func newIngressLister() (reconcile.IngressLister, error) {
+func kubeConfig() (*rest.Config, error) {
 	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-		kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{})
-		cfg, err = kubeConfig.ClientConfig()
-		if err != nil {
-			return nil, err
-		}
+	if err == nil {
+		return cfg, nil
 	}
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	kube := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{})
+	return kube.ClientConfig()
+}
+
+func newIngressLister(cfg *rest.Config) (reconcile.IngressLister, error) {
 	client, err := networkingclient.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 	return client.Ingresses(""), nil
+}
+
+var httpRouteGVR = schema.GroupVersionResource{
+	Group:    gatewayv1.GroupVersion.Group,
+	Version:  gatewayv1.GroupVersion.Version,
+	Resource: "httproutes",
+}
+
+type httpRouteLister struct {
+	client dynamic.NamespaceableResourceInterface
+}
+
+func newHTTPRouteLister(cfg *rest.Config) (reconcile.HTTPRouteLister, error) {
+	client, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &httpRouteLister{client: client.Resource(httpRouteGVR)}, nil
+}
+
+func (l *httpRouteLister) List(ctx context.Context, opts metav1.ListOptions) (*gatewayv1.HTTPRouteList, error) {
+	raw, err := l.client.List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	data, err := raw.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	var out gatewayv1.HTTPRouteList
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // applyCgroupMemLimit sets GOMEMLIMIT to 90% of the container memory

@@ -8,6 +8,7 @@ import (
 	"github.com/breml/go-uptime-kuma-client/notification"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 func TestJoinURL(t *testing.T) {
@@ -77,6 +78,48 @@ func TestExtractIngressURL(t *testing.T) {
 	}
 	if _, err = extractIngressURL(ing, "/", "missing.example.com"); err == nil {
 		t.Fatal("expected error for unknown host")
+	}
+}
+
+func TestExtractHTTPRouteURL(t *testing.T) {
+	t.Parallel()
+	https := gatewayv1.SectionName("https")
+	http := gatewayv1.SectionName("http")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "ns"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Hostnames: []gatewayv1.Hostname{"app.example.com", "www.example.com"},
+		},
+	}
+	route.Spec.ParentRefs = []gatewayv1.ParentReference{{SectionName: &https}}
+	got, err := extractHTTPRouteURL(route, "/up", "")
+	if err != nil || got != "https://app.example.com/up" {
+		t.Fatalf("first host: %q %v", got, err)
+	}
+	got, err = extractHTTPRouteURL(route, "/", "www.example.com")
+	if err != nil || got != "https://www.example.com" {
+		t.Fatalf("preferred host: %q %v", got, err)
+	}
+	route.Spec.ParentRefs = []gatewayv1.ParentReference{{SectionName: &http}}
+	got, err = extractHTTPRouteURL(route, "/", "")
+	if err != nil || got != "http://app.example.com" {
+		t.Fatalf("http listener: %q %v", got, err)
+	}
+	if _, err = extractHTTPRouteURL(route, "/", "missing.example.com"); err == nil {
+		t.Fatal("expected error for unknown host")
+	}
+}
+
+func TestSkipBridgeIngress(t *testing.T) {
+	t.Parallel()
+	if !skipBridgeIngress(uptimeOnlyIngressClass, true) {
+		t.Fatal("expected bridge ingress to be skipped once httproutes list")
+	}
+	if skipBridgeIngress(uptimeOnlyIngressClass, false) {
+		t.Fatal("bridge ingress must stay while httproutes cannot be listed")
+	}
+	if skipBridgeIngress("nginx-external", true) {
+		t.Fatal("real ingresses stay")
 	}
 }
 
