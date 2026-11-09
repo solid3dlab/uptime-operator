@@ -3,7 +3,7 @@ module github.com/solid3dlab/uptime-operator
 go 1.27.0
 
 require (
-	github.com/breml/go-uptime-kuma-client v0.7.0
+	github.com/breml/go-uptime-kuma-client v0.7.2
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
