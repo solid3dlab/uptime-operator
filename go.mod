@@ -5,9 +5,9 @@ go 1.27.0
 require (
 	github.com/breml/go-uptime-kuma-client v0.7.5
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/client-go v0.37.2
+	k8s.io/api v0.37.3
+	k8s.io/apimachinery v0.37.3
+	k8s.io/client-go v0.37.3
 	sigs.k8s.io/gateway-api v1.7.0
 )
 
